@@ -5,6 +5,7 @@ export type StudyCardFields = {
   doesNotSolve: string;
   verification: string;
   summary: string;
+  notes: string;
 };
 
 export type StudyCard = {
@@ -17,25 +18,28 @@ export type StudyCard = {
   fields: StudyCardFields;
 };
 
+export type CardDeletion = {
+  deletedAt: string;
+  deviceId: string;
+};
+
 export type CardDatabase = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   deviceId: string;
   cards: StudyCard[];
+  deletedCards: Record<string, CardDeletion>;
   lastSavedAt: string;
 };
 
 export type ThemePreference = "system" | "light" | "dark";
 
 export type AppSettings = {
-  googleDriveClientId: string;
-  syncEnabled: boolean;
   themePreference: ThemePreference;
 };
 
 export type DriveStatus = {
   configured: boolean;
   signedIn: boolean;
-  syncEnabled: boolean;
   lastSyncedAt: string | null;
 };
 

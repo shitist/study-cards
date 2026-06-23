@@ -42,7 +42,8 @@ const fieldLabels: Record<keyof StudyCardFields, string> = {
   encounteredBecause: "\u6211\u4e3a\u4ec0\u4e48\u9047\u5230\u5b83",
   solves: "\u5b83\u89e3\u51b3\u4ec0\u4e48\u95ee\u9898",
   doesNotSolve: "\u5b83\u4e0d\u89e3\u51b3\u4ec0\u4e48\u95ee\u9898",
-  verification: "\u6211\u5b9e\u9645\u600e\u4e48\u9a8c\u8bc1"
+  verification: "\u6211\u5b9e\u9645\u600e\u4e48\u9a8c\u8bc1",
+  notes: "\u5907\u6ce8"
 };
 
 export const emptyFields: StudyCardFields = {
@@ -51,7 +52,8 @@ export const emptyFields: StudyCardFields = {
   solves: "",
   doesNotSolve: "",
   verification: "",
-  summary: ""
+  summary: "",
+  notes: ""
 };
 
 export function nowIso() {
@@ -103,9 +105,10 @@ export function categoryMatches(cardCategory: string, filterCategory: string) {
 
 export function createEmptyDatabase(): CardDatabase {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     deviceId: crypto.randomUUID(),
     cards: [],
+    deletedCards: {},
     lastSavedAt: nowIso()
   };
 }

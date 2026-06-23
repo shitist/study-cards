@@ -21,7 +21,7 @@ import {
   Trash2,
   X
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AI_LLM_CATEGORY,
   AI_LLM_SUBCATEGORIES,
@@ -83,6 +83,8 @@ const TEXT = {
   solvesPlaceholder: "\u7528\u81ea\u5df1\u7684\u8bdd\u89e3\u91ca\u5b83\u7684\u7528\u9014\u3002",
   boundaryPlaceholder: "\u8bb0\u5f55\u8fb9\u754c\uff0c\u907f\u514d\u4ee5\u540e\u8bef\u7528\u3002",
   verificationPlaceholder: "\u5199\u4e0b\u53ef\u4ee5\u4eb2\u624b\u8dd1\u7684\u5c0f\u5b9e\u9a8c\u6216\u5224\u65ad\u65b9\u6cd5\u3002",
+  notes: "\u5907\u6ce8",
+  notesPlaceholder: "\u8bb0\u5f55\u8865\u5145\u4fe1\u606f\u3001\u540e\u7eed\u60f3\u6cd5\u6216\u5176\u4ed6\u9700\u8981\u4fdd\u7559\u7684\u5185\u5bb9\u3002",
   system: "\u8ddf\u968f\u7cfb\u7edf",
   light: "\u6d45\u8272",
   dark: "\u6df1\u8272",
@@ -116,7 +118,6 @@ const TEXT = {
   theme: "\u4e3b\u9898",
   connected: "\u5df2\u8fde\u63a5",
   disconnected: "\u672a\u8fde\u63a5",
-  saveSettings: "\u4fdd\u5b58\u8bbe\u7f6e",
   signIn: "\u767b\u5f55",
   syncNow: "\u7acb\u5373\u540c\u6b65",
   disconnect: "\u65ad\u5f00\u8fde\u63a5",
@@ -125,14 +126,23 @@ const TEXT = {
   localData: "\u672c\u5730\u6570\u636e",
   browserPreview: "\u6d4f\u89c8\u5668\u9884\u89c8\u6a21\u5f0f",
   close: "\u5173\u95ed",
+  editor: "\u7f16\u8f91",
+  sync: "\u540c\u6b65",
+  syncing: "\u6b63\u5728\u540c\u6b65",
+  autoSync: "\u81ea\u52a8\u540c\u6b65",
+  autoSyncEnabled: "\u6bcf 5 \u5206\u949f",
+  backgroundSyncing: "\u540e\u53f0\u540c\u6b65\u4e2d",
+  autoSyncFailed: "\u81ea\u52a8\u540c\u6b65\u5931\u8d25\uff1a",
+  oauthNotConfigured: "\u5f53\u524d\u6784\u5efa\u672a\u914d\u7f6e Google OAuth\u3002",
   createdToast: "\u5df2\u65b0\u5efa\u5361\u7247",
   savedToast: "\u5df2\u4fdd\u5b58\u5361\u7247",
   deletedToast: "\u5df2\u5220\u9664\u5361\u7247",
   copiedToast: "\u5df2\u590d\u5236 Markdown",
-  settingsSavedToast: "\u540c\u6b65\u8bbe\u7f6e\u5df2\u4fdd\u5b58",
   driveSignInToast: "Google Drive \u5df2\u8fde\u63a5",
   driveSignOutToast: "\u5df2\u65ad\u5f00 Google Drive",
-  dataLoadBlocked: "\u672c\u5730\u6570\u636e\u8bfb\u53d6\u5931\u8d25\uff0c\u5df2\u6682\u505c\u5199\u5165\uff0c\u907f\u514d\u8986\u76d6\u539f\u6587\u4ef6\u3002\u8bf7\u5148\u5904\u7406\u9519\u8bef\u6216\u5907\u4efd\u6587\u4ef6\u540e\u91cd\u542f\u5e94\u7528\u3002"
+  dataLoadBlocked: "\u672c\u5730\u6570\u636e\u8bfb\u53d6\u5931\u8d25\uff0c\u5df2\u6682\u505c\u5199\u5165\uff0c\u907f\u514d\u8986\u76d6\u539f\u6587\u4ef6\u3002\u8bf7\u5148\u5904\u7406\u9519\u8bef\u6216\u5907\u4efd\u6587\u4ef6\u540e\u91cd\u542f\u5e94\u7528\u3002",
+  syncInProgress: "\u6b63\u5728\u540c\u6b65 Google Drive\uff0c\u8bf7\u7b49\u5f85\u540c\u6b65\u5b8c\u6210\u540e\u518d\u4fee\u6539\u5361\u7247\u3002",
+  saveBeforeSync: "\u5f53\u524d\u5361\u7247\u8fd8\u6709\u672a\u4fdd\u5b58\u7684\u4fee\u6539\uff0c\u8bf7\u5148\u4fdd\u5b58\u518d\u540c\u6b65\u3002"
 };
 
 const fieldDefinitions: FieldDefinition[] = [
@@ -141,9 +151,11 @@ const fieldDefinitions: FieldDefinition[] = [
   { key: "encounteredBecause", label: TEXT.encounteredBecause, placeholder: TEXT.encounteredPlaceholder, rows: 3 },
   { key: "solves", label: TEXT.solves, placeholder: TEXT.solvesPlaceholder, rows: 3 },
   { key: "doesNotSolve", label: TEXT.doesNotSolve, placeholder: TEXT.boundaryPlaceholder, rows: 3 },
-  { key: "verification", label: TEXT.verification, placeholder: TEXT.verificationPlaceholder, rows: 3 }
+  { key: "verification", label: TEXT.verification, placeholder: TEXT.verificationPlaceholder, rows: 3 },
+  { key: "notes", label: TEXT.notes, placeholder: TEXT.notesPlaceholder, rows: 4 }
 ];
 
+const AUTO_SYNC_INTERVAL_MS = 5 * 60_000;
 const CUSTOM_SUBCATEGORY_VALUE = "__custom__";
 const CUSTOM_SUBCATEGORY_LABEL = TEXT.customSubcategory;
 
@@ -156,7 +168,6 @@ const themeOptions: Array<{ value: ThemePreference; label: string; icon: typeof 
 const defaultDriveStatus: DriveStatus = {
   configured: false,
   signedIn: false,
-  syncEnabled: false,
   lastSyncedAt: null
 };
 
@@ -181,23 +192,36 @@ export default function App() {
   const [draft, setDraft] = useState<StudyCard | null>(null);
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState(ALL_CATEGORIES);
-  const [rootOpen, setRootOpen] = useState(true);
-  const [openCategoryIds, setOpenCategoryIds] = useState<string[]>(["ai-llm"]);
-  const [settings, setSettings] = useState<AppSettings>({ googleDriveClientId: "", syncEnabled: false, themePreference: "system" });
+  const [rootOpen, setRootOpen] = useState(false);
+  const [openCategoryIds, setOpenCategoryIds] = useState<string[]>([]);
+  const [settings, setSettings] = useState<AppSettings>({ themePreference: "system" });
   const [driveStatus, setDriveStatus] = useState<DriveStatus>(defaultDriveStatus);
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [autoSyncBusy, setAutoSyncBusy] = useState(false);
   const [error, setError] = useState("");
   const [dataLoadBlocked, setDataLoadBlocked] = useState(false);
   const { message: toast, showToast } = useToast();
+  const syncInFlightRef = useRef(false);
+  const autoSyncRunnerRef = useRef<() => Promise<void>>(async () => undefined);
+  const backgroundSyncPromiseRef = useRef<Promise<void> | null>(null);
+  const preserveDraftOnSyncRef = useRef(false);
+  const databaseRef = useRef(database);
+  const draftRef = useRef(draft);
+  databaseRef.current = database;
+  draftRef.current = draft;
 
   useEffect(() => {
     let mounted = true;
+
     async function bootstrap() {
+      let loadedDb: CardDatabase;
       try {
-        const loadedDb = await loadCards();
+        loadedDb = await loadCards();
         if (!mounted) return;
+        databaseRef.current = loadedDb;
         setDatabase(loadedDb);
         setSelectedId(loadedDb.cards[0]?.id ?? null);
         setDataLoadBlocked(false);
@@ -223,6 +247,7 @@ export default function App() {
         setError(nextError instanceof Error ? nextError.message : String(nextError));
       }
     }
+
     bootstrap();
     return () => {
       mounted = false;
@@ -249,8 +274,17 @@ export default function App() {
   );
 
   useEffect(() => {
-    setDraft(selectedCard ? cloneCard(selectedCard) : null);
-  }, [selectedCard]);
+    const currentDraft = draftRef.current;
+    if (preserveDraftOnSyncRef.current && currentDraft?.id === selectedId) {
+      preserveDraftOnSyncRef.current = false;
+      return;
+    }
+
+    preserveDraftOnSyncRef.current = false;
+    const nextDraft = selectedCard ? cloneCard(selectedCard) : null;
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
+  }, [selectedCard, selectedId]);
 
   const dynamicAiSubcategories = useMemo(() => {
     const customSubcategories = database.cards
@@ -286,7 +320,7 @@ export default function App() {
     [database.cards, query, activeCategory]
   );
 
-  const hasUnsavedChanges = Boolean(draft && selectedCard && JSON.stringify(draft) !== JSON.stringify(selectedCard));
+  const hasUnsavedChanges = Boolean(draft && (!selectedCard || JSON.stringify(draft) !== JSON.stringify(selectedCard)));
 
   const draftCategory = useMemo(() => {
     if (!draft) return { major: AI_LLM_CATEGORY, subcategory: AI_LLM_SUBCATEGORIES[0] };
@@ -317,57 +351,187 @@ export default function App() {
     return false;
   }
 
+  function guardCardMutation() {
+    if (!guardWritableData()) return false;
+    if (!syncBusy) return true;
+    setError(TEXT.syncInProgress);
+    return false;
+  }
+
+  async function waitForBackgroundSync() {
+    const pendingSync = backgroundSyncPromiseRef.current;
+    if (pendingSync) await pendingSync;
+  }
+
+  function hasUnsavedDraftNow() {
+    const currentDraft = draftRef.current;
+    if (!currentDraft) return false;
+    const savedCard = databaseRef.current.cards.find((card) => card.id === currentDraft.id);
+    return !savedCard || JSON.stringify(currentDraft) !== JSON.stringify(savedCard);
+  }
+
+  async function runDriveSync(announceResult: boolean) {
+    if (
+      !hasNativeBridge ||
+      dataLoadBlocked ||
+      !driveStatus.signedIn ||
+      hasUnsavedDraftNow() ||
+      syncInFlightRef.current
+    ) {
+      return;
+    }
+
+    syncInFlightRef.current = true;
+    if (announceResult) {
+      setSyncBusy(true);
+      setBusy(true);
+    } else {
+      setAutoSyncBusy(true);
+    }
+    setError("");
+
+    const operation = (async () => {
+      try {
+        const result = await syncDrive();
+        const currentDraft = draftRef.current;
+        const preserveDraft = !announceResult && hasUnsavedDraftNow();
+        preserveDraftOnSyncRef.current = preserveDraft;
+        databaseRef.current = result.database;
+        setDatabase(result.database);
+        setDriveStatus(await getDriveStatus());
+        setSelectedId((current) =>
+          preserveDraft && currentDraft?.id === current
+            ? current
+            : current && result.database.cards.some((card) => card.id === current)
+              ? current
+              : result.database.cards[0]?.id ?? null
+        );
+        if (announceResult || result.conflicts > 0) showToast(result.message);
+      } catch (nextError) {
+        const details = nextError instanceof Error ? nextError.message : String(nextError);
+        setError((announceResult ? "" : TEXT.autoSyncFailed) + details);
+      } finally {
+        syncInFlightRef.current = false;
+        if (announceResult) {
+          setSyncBusy(false);
+          setBusy(false);
+        } else {
+          setAutoSyncBusy(false);
+        }
+      }
+    })();
+
+    if (!announceResult) backgroundSyncPromiseRef.current = operation;
+    try {
+      await operation;
+    } finally {
+      if (backgroundSyncPromiseRef.current === operation) {
+        backgroundSyncPromiseRef.current = null;
+      }
+    }
+  }
+
+  // Interval callbacks always call the runner from the latest render.
+  autoSyncRunnerRef.current = async () => {
+    await runDriveSync(false);
+  };
+
+  useEffect(() => {
+    if (!driveStatus.signedIn || !hasNativeBridge) return undefined;
+    const intervalId = window.setInterval(() => {
+      void autoSyncRunnerRef.current();
+    }, AUTO_SYNC_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [driveStatus.signedIn]);
+
   async function persist(nextDatabase: CardDatabase) {
     const saved = await saveCards(nextDatabase);
+    databaseRef.current = saved;
     setDatabase(saved);
     return saved;
   }
 
   async function handleCreateCard() {
-    if (!guardWritableData()) return;
+    if (!guardCardMutation()) return;
+    await waitForBackgroundSync();
+    const currentDatabase = databaseRef.current;
     const card = createCard(activeCategory !== ALL_CATEGORIES ? activeCategory : DEFAULT_CATEGORY);
-    const nextCards = [card, ...database.cards];
-    const saved = await persist({ ...database, cards: nextCards });
-    setSelectedId(saved.cards[0].id);
+    await persist({ ...currentDatabase, cards: [card, ...currentDatabase.cards] });
+    setSelectedId(card.id);
     showToast(TEXT.createdToast);
   }
 
   async function handleSaveDraft() {
-    if (!draft || !guardWritableData()) return;
+    const requestedCardId = draftRef.current?.id;
+    if (!requestedCardId || !guardCardMutation()) return;
+    await waitForBackgroundSync();
+    const currentDraft = draftRef.current;
+    if (!currentDraft || currentDraft.id !== requestedCardId) return;
+
     const timestamp = nowIso();
     const normalized = normalizeCard({
-      ...draft,
+      ...currentDraft,
       updatedAt: timestamp,
-      updateHistory: [...draft.updateHistory, timestamp]
+      updateHistory: [...currentDraft.updateHistory, timestamp]
     });
-    const nextCards = database.cards
-      .map((card) => (card.id === normalized.id ? normalized : card))
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    const saved = await persist({ ...database, cards: nextCards });
+    const currentDatabase = databaseRef.current;
+    const cardExists = currentDatabase.cards.some((card) => card.id === normalized.id);
+    const nextCards = (cardExists
+      ? currentDatabase.cards.map((card) => (card.id === normalized.id ? normalized : card))
+      : [normalized, ...currentDatabase.cards]
+    ).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const nextDeletedCards = { ...currentDatabase.deletedCards };
+    delete nextDeletedCards[normalized.id];
+    const saved = await persist({
+      ...currentDatabase,
+      cards: nextCards,
+      deletedCards: nextDeletedCards
+    });
     setSelectedId(normalized.id);
-    setDraft(cloneCard(saved.cards.find((card) => card.id === normalized.id) ?? normalized));
+    const savedDraft = cloneCard(saved.cards.find((card) => card.id === normalized.id) ?? normalized);
+    draftRef.current = savedDraft;
+    setDraft(savedDraft);
     showToast(TEXT.savedToast);
   }
 
   async function handleDeleteCard(cardId: string) {
-    if (!guardWritableData()) return;
-    const card = database.cards.find((item) => item.id === cardId);
+    if (!guardCardMutation()) return;
+    const card =
+      databaseRef.current.cards.find((item) => item.id === cardId) ??
+      (draftRef.current?.id === cardId ? draftRef.current : null);
     if (!card) return;
-    const confirmed = window.confirm(`${TEXT.deleteCard}\u300c${getCardTitle(card)}\u300d\uff1f`);
+    const confirmed = window.confirm(TEXT.deleteCard + "「" + getCardTitle(card) + "」？");
     if (!confirmed) return;
 
-    const nextCards = database.cards.filter((item) => item.id !== cardId);
-    const saved = await persist({ ...database, cards: nextCards });
+    await waitForBackgroundSync();
+    const currentDatabase = databaseRef.current;
+    const deletedAt = nowIso();
+    const saved = await persist({
+      ...currentDatabase,
+      cards: currentDatabase.cards.filter((item) => item.id !== cardId),
+      deletedCards: {
+        ...currentDatabase.deletedCards,
+        [cardId]: { deletedAt, deviceId: currentDatabase.deviceId }
+      }
+    });
     setSelectedId(saved.cards[0]?.id ?? null);
     showToast(TEXT.deletedToast);
   }
 
   function updateDraftField(key: keyof StudyCardFields, value: string) {
-    setDraft((current) => (current ? { ...current, fields: { ...current.fields, [key]: value } } : current));
+    setDraft((current) => {
+      const nextDraft = current ? { ...current, fields: { ...current.fields, [key]: value } } : current;
+      draftRef.current = nextDraft;
+      return nextDraft;
+    });
   }
 
   function updateDraftCategory(value: string) {
-    setDraft((current) => (current ? { ...current, category: value } : current));
+    setDraft((current) => {
+      const nextDraft = current ? { ...current, category: value } : current;
+      draftRef.current = nextDraft;
+      return nextDraft;
+    });
   }
 
   function updateDraftMajorCategory(major: string) {
@@ -413,26 +577,10 @@ export default function App() {
     }
   }
 
-  async function handleSaveSettings() {
-    try {
-      setBusy(true);
-      setError("");
-      const saved = await saveSettings(settings);
-      setSettings(saved);
-      setDriveStatus(await getDriveStatus());
-      showToast(TEXT.settingsSavedToast);
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : String(nextError));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function handleDriveSignIn() {
     try {
       setBusy(true);
       setError("");
-      await saveSettings(settings);
       const status = await signInDrive();
       setDriveStatus(status);
       showToast(TEXT.driveSignInToast);
@@ -459,21 +607,12 @@ export default function App() {
 
   async function handleDriveSync() {
     if (!guardWritableData()) return;
-    try {
-      setBusy(true);
-      setError("");
-      const result = await syncDrive();
-      setDatabase(result.database);
-      setDriveStatus(await getDriveStatus());
-      setSelectedId(result.database.cards[0]?.id ?? null);
-      showToast(result.message);
-    } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : String(nextError));
-    } finally {
-      setBusy(false);
+    if (hasUnsavedChanges) {
+      setError(TEXT.saveBeforeSync);
+      return;
     }
+    await runDriveSync(true);
   }
-
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -485,7 +624,7 @@ export default function App() {
           </div>
         </div>
 
-        <button className="primary-button" onClick={handleCreateCard} disabled={dataLoadBlocked}>
+        <button className="primary-button" onClick={handleCreateCard} disabled={dataLoadBlocked || syncBusy}>
           <Plus size={18} />
           {TEXT.newCard}
         </button>
@@ -574,8 +713,14 @@ export default function App() {
             {TEXT.syncSettings}
           </button>
           <div className="sync-pill">
-            {driveStatus.signedIn ? <Cloud size={15} /> : <CloudOff size={15} />}
-            {driveStatus.signedIn ? TEXT.driveConnected : TEXT.localSave}
+            {autoSyncBusy ? (
+              <Loader2 className="spin" size={15} />
+            ) : driveStatus.signedIn ? (
+              <Cloud size={15} />
+            ) : (
+              <CloudOff size={15} />
+            )}
+            {autoSyncBusy ? TEXT.backgroundSyncing : driveStatus.signedIn ? TEXT.driveConnected : TEXT.localSave}
           </div>
         </div>
       </aside>
@@ -633,7 +778,7 @@ export default function App() {
             {filteredCards.length === 0 ? (
               <div className="empty-state">
                 <h3>{TEXT.noMatchingCards}</h3>
-                <button className="secondary-button" onClick={handleCreateCard} disabled={dataLoadBlocked}>
+                <button className="secondary-button" onClick={handleCreateCard} disabled={dataLoadBlocked || syncBusy}>
                   <Plus size={17} />
                   {TEXT.newOne}
                 </button>
@@ -647,23 +792,23 @@ export default function App() {
             <>
               <div className="editor-header">
                 <label className="editor-title-block">
-                  <span className="eyebrow">Editor</span>
+                  <span className="eyebrow">{TEXT.editor}</span>
                   <input
                     className="title-input"
                     value={draft.fields.concept}
                     onChange={(event) => updateDraftField("concept", event.target.value)}
-                    placeholder={TEXT.unnamedCard}
+                    placeholder={TEXT.unnamedCard} disabled={syncBusy}
                   />
                 </label>
                 <div className="editor-actions">
-                  <button className="icon-button danger" title={TEXT.deleteCard} onClick={() => handleDeleteCard(draft.id)} disabled={dataLoadBlocked}>
+                  <button className="icon-button danger" title={TEXT.deleteCard} onClick={() => handleDeleteCard(draft.id)} disabled={dataLoadBlocked || syncBusy}>
                     <Trash2 size={17} />
                   </button>
                   <button className="secondary-button" onClick={() => handleCopy(draft)}>
                     <ClipboardCopy size={17} />
                     {TEXT.copy}
                   </button>
-                  <button className="primary-button compact" onClick={handleSaveDraft} disabled={dataLoadBlocked || !hasUnsavedChanges}>
+                  <button className="primary-button compact" onClick={handleSaveDraft} disabled={dataLoadBlocked || syncBusy || !hasUnsavedChanges}>
                     <Save size={17} />
                     {TEXT.save}
                   </button>
@@ -679,7 +824,7 @@ export default function App() {
               <div className="category-input-block">
                 <label className="field-block compact-field">
                   <span>{TEXT.majorCategory}</span>
-                  <select value={draftCategory.major} onChange={(event) => updateDraftMajorCategory(event.target.value)}>
+                  <select value={draftCategory.major} onChange={(event) => updateDraftMajorCategory(event.target.value)} disabled={syncBusy}>
                     {CATEGORY_TREE.map((category) => (
                       <option key={category.id} value={category.label}>
                         {category.label}
@@ -692,7 +837,7 @@ export default function App() {
                   <>
                     <label className="field-block compact-field">
                       <span>{TEXT.aiSubcategory}</span>
-                      <select value={draftAiSubcategorySelectValue} onChange={(event) => updateDraftAiSubcategory(event.target.value)}>
+                      <select value={draftAiSubcategorySelectValue} onChange={(event) => updateDraftAiSubcategory(event.target.value)} disabled={syncBusy}>
                         {AI_LLM_SUBCATEGORIES.map((subcategory) => (
                           <option key={subcategory} value={subcategory}>
                             {subcategory}
@@ -708,7 +853,7 @@ export default function App() {
                         <input
                           value={draftCategory.subcategory}
                           onChange={(event) => updateDraftCustomAiSubcategory(event.target.value)}
-                          placeholder={TEXT.customSubcategoryPlaceholder}
+                          placeholder={TEXT.customSubcategoryPlaceholder} disabled={syncBusy}
                         />
                       </label>
                     ) : null}
@@ -724,13 +869,13 @@ export default function App() {
                       <input
                         value={draft.fields[field.key]}
                         onChange={(event) => updateDraftField(field.key, event.target.value)}
-                        placeholder={field.placeholder}
+                        placeholder={field.placeholder} disabled={syncBusy}
                       />
                     ) : (
                       <textarea
                         value={draft.fields[field.key]}
                         onChange={(event) => updateDraftField(field.key, event.target.value)}
-                        placeholder={field.placeholder}
+                        placeholder={field.placeholder} disabled={syncBusy}
                         rows={field.rows}
                       />
                     )}
@@ -741,7 +886,7 @@ export default function App() {
           ) : (
             <div className="empty-editor">
               <h2>{TEXT.chooseOrCreate}</h2>
-              <button className="primary-button" onClick={handleCreateCard} disabled={dataLoadBlocked}>
+              <button className="primary-button" onClick={handleCreateCard} disabled={dataLoadBlocked || syncBusy}>
                 <Plus size={18} />
                 {TEXT.newCard}
               </button>
@@ -754,7 +899,7 @@ export default function App() {
         <div className="settings-card">
           <div className="settings-header">
             <div>
-              <p className="eyebrow">Sync</p>
+              <p className="eyebrow">{TEXT.sync}</p>
               <h2>Google Drive</h2>
             </div>
             <button className="icon-button" title={TEXT.close} onClick={() => setSettingsOpen(false)}>
@@ -763,8 +908,14 @@ export default function App() {
           </div>
 
           <div className="status-line">
-            {driveStatus.signedIn ? <Check size={17} /> : <AlertTriangle size={17} />}
-            <span>{driveStatus.signedIn ? TEXT.connected : TEXT.disconnected}</span>
+            {syncBusy ? (
+              <Loader2 className="spin" size={17} />
+            ) : driveStatus.signedIn ? (
+              <Check size={17} />
+            ) : (
+              <AlertTriangle size={17} />
+            )}
+            <span>{syncBusy ? TEXT.syncing : driveStatus.signedIn ? TEXT.connected : TEXT.disconnected}</span>
           </div>
 
           <div className="theme-section">
@@ -784,36 +935,34 @@ export default function App() {
             </div>
           </div>
 
-          <label className="field-block compact-field">
-            <span>OAuth Client ID</span>
-            <input
-              value={settings.googleDriveClientId}
-              onChange={(event) => setSettings({ ...settings, googleDriveClientId: event.target.value })}
-              placeholder="xxxx.apps.googleusercontent.com"
-              spellCheck={false}
-            />
-          </label>
+          {!driveStatus.configured ? (
+            <p className="sync-config-warning">{TEXT.oauthNotConfigured}</p>
+          ) : null}
 
           <div className="settings-actions">
-            <button className="secondary-button" onClick={handleSaveSettings} disabled={busy}>
-              {TEXT.saveSettings}
-            </button>
-            <button className="primary-button compact" onClick={handleDriveSignIn} disabled={busy || !hasNativeBridge}>
+            <button
+              className="primary-button compact"
+              onClick={handleDriveSignIn}
+              disabled={busy || syncBusy || autoSyncBusy || !hasNativeBridge || !driveStatus.configured}
+            >
               {busy ? <Loader2 className="spin" size={17} /> : <Cloud size={17} />}
               {TEXT.signIn}
             </button>
           </div>
-
-          <button className="wide-action" onClick={handleDriveSync} disabled={dataLoadBlocked || busy || !driveStatus.signedIn}>
-            {busy ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
+          <button className="wide-action" onClick={handleDriveSync} disabled={dataLoadBlocked || busy || syncBusy || autoSyncBusy || !driveStatus.signedIn}>
+            {syncBusy ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
             {TEXT.syncNow}
           </button>
 
-          <button className="text-button" onClick={handleDriveSignOut} disabled={busy || !driveStatus.signedIn}>
+          <button className="text-button" onClick={handleDriveSignOut} disabled={busy || syncBusy || autoSyncBusy || !driveStatus.signedIn}>
             {TEXT.disconnect}
           </button>
 
           <dl className="settings-facts">
+            <div>
+              <dt>{TEXT.autoSync}</dt>
+              <dd>{TEXT.autoSyncEnabled}</dd>
+            </div>
             <div>
               <dt>{TEXT.lastSync}</dt>
               <dd>{driveStatus.lastSyncedAt ? formatDate(driveStatus.lastSyncedAt) : TEXT.neverSynced}</dd>

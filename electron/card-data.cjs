@@ -1,8 +1,9 @@
 const crypto = require("node:crypto");
 
-const DATABASE_KEYS = new Set(["schemaVersion", "deviceId", "cards", "lastSavedAt"]);
+const DATABASE_KEYS = new Set(["schemaVersion", "deviceId", "cards", "deletedCards", "lastSavedAt"]);
 const CARD_KEYS = new Set(["id", "category", "createdAt", "updatedAt", "updateHistory", "conflictOf", "fields"]);
-const FIELD_KEYS = new Set(["concept", "encounteredBecause", "solves", "doesNotSolve", "verification", "summary"]);
+const FIELD_KEYS = new Set(["concept", "encounteredBecause", "solves", "doesNotSolve", "verification", "summary", "notes"]);
+const DELETION_KEYS = new Set(["deletedAt", "deviceId"]);
 const FALLBACK_CATEGORY = "\u672a\u5206\u7c7b";
 const CONFLICT_SUFFIX = "\uff08\u51b2\u7a81\u526f\u672c\uff09";
 
@@ -12,9 +13,10 @@ function nowIso() {
 
 function createEmptyDatabase() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     deviceId: crypto.randomUUID(),
     cards: [],
+    deletedCards: {},
     lastSavedAt: nowIso()
   };
 }
@@ -74,12 +76,19 @@ function validateCardForSave(card, path) {
   validateCardFieldsForSave(card.fields, `${path}.fields`);
 }
 
+function validateDeletionForSave(deletion, path) {
+  assertPlainObject(deletion, path);
+  assertKnownKeys(deletion, DELETION_KEYS, path);
+  assertRequiredString(deletion.deletedAt, `${path}.deletedAt`);
+  assertRequiredString(deletion.deviceId, `${path}.deviceId`);
+}
+
 function validateCardDatabaseForSave(database) {
   assertPlainObject(database, "database");
   assertKnownKeys(database, DATABASE_KEYS, "database");
 
-  if (database.schemaVersion !== 1) {
-    throw new TypeError("database.schemaVersion must be 1.");
+  if (database.schemaVersion !== 2) {
+    throw new TypeError("database.schemaVersion must be 2.");
   }
   assertRequiredString(database.deviceId, "database.deviceId");
   assertRequiredString(database.lastSavedAt, "database.lastSavedAt");
@@ -89,18 +98,52 @@ function validateCardDatabaseForSave(database) {
   }
   database.cards.forEach((card, index) => validateCardForSave(card, `database.cards[${index}]`));
 
+  assertPlainObject(database.deletedCards, "database.deletedCards");
+  for (const [cardId, deletion] of Object.entries(database.deletedCards)) {
+    assertRequiredString(cardId, "database.deletedCards key");
+    validateDeletionForSave(deletion, `database.deletedCards[${JSON.stringify(cardId)}]`);
+  }
+
   return normalizeDatabase(database);
+}
+
+function normalizeDeletedCards(value, fallbackDeviceId) {
+  if (!isPlainObject(value)) return {};
+
+  const deletedCards = {};
+  for (const [cardId, deletion] of Object.entries(value)) {
+    if (!cardId || !isPlainObject(deletion) || typeof deletion.deletedAt !== "string" || !deletion.deletedAt) continue;
+    deletedCards[cardId] = {
+      deletedAt: deletion.deletedAt,
+      deviceId: typeof deletion.deviceId === "string" && deletion.deviceId ? deletion.deviceId : fallbackDeviceId
+    };
+  }
+  return deletedCards;
 }
 
 function normalizeDatabase(value) {
   const fallback = createEmptyDatabase();
   if (!value || typeof value !== "object") return fallback;
 
-  const cards = Array.isArray(value.cards) ? value.cards : [];
+  const deviceId = typeof value.deviceId === "string" && value.deviceId ? value.deviceId : fallback.deviceId;
+  const cards = Array.isArray(value.cards) ? value.cards.map(normalizeCard).filter(Boolean) : [];
+  const deletedCards = normalizeDeletedCards(value.deletedCards, deviceId);
+  const activeCards = [];
+
+  // cards and deletedCards are separate collections, so removing an obsolete tombstone is iteration-safe.
+  for (const card of cards) {
+    const deletion = deletedCards[card.id];
+    if (!deletion || card.updatedAt > deletion.deletedAt) {
+      activeCards.push(card);
+      if (deletion) delete deletedCards[card.id];
+    }
+  }
+
   return {
-    schemaVersion: 1,
-    deviceId: typeof value.deviceId === "string" && value.deviceId ? value.deviceId : fallback.deviceId,
-    cards: cards.map(normalizeCard).filter(Boolean),
+    schemaVersion: 2,
+    deviceId,
+    cards: activeCards,
+    deletedCards,
     lastSavedAt: typeof value.lastSavedAt === "string" ? value.lastSavedAt : nowIso()
   };
 }
@@ -124,7 +167,8 @@ function normalizeCard(card) {
       solves: typeof fields.solves === "string" ? fields.solves : "",
       doesNotSolve: typeof fields.doesNotSolve === "string" ? fields.doesNotSolve : "",
       verification: typeof fields.verification === "string" ? fields.verification : "",
-      summary: typeof fields.summary === "string" ? fields.summary : ""
+      summary: typeof fields.summary === "string" ? fields.summary : "",
+      notes: typeof fields.notes === "string" ? fields.notes : ""
     }
   };
 }
@@ -170,27 +214,83 @@ function cloneCardAsConflict(card, timestamp) {
 
 function mergeDatabases(localDb, remoteDb, lastSyncedAt) {
   const timestamp = nowIso();
-  const merged = new Map();
+  const localDatabase = normalizeDatabase(localDb);
+  const remoteDatabase = normalizeDatabase(remoteDb);
+  const mergedCards = new Map();
+  const mergedDeletions = {};
   const conflicts = [];
-  const localById = new Map(localDb.cards.map((card) => [card.id, card]));
-  const remoteById = new Map(remoteDb.cards.map((card) => [card.id, card]));
-  const ids = new Set([...localById.keys(), ...remoteById.keys()]);
+  const localById = new Map(localDatabase.cards.map((card) => [card.id, card]));
+  const remoteById = new Map(remoteDatabase.cards.map((card) => [card.id, card]));
+  const ids = new Set([
+    ...localById.keys(),
+    ...remoteById.keys(),
+    ...Object.keys(localDatabase.deletedCards),
+    ...Object.keys(remoteDatabase.deletedCards)
+  ]);
+
+  function keepCard(card) {
+    mergedCards.set(card.id, card);
+  }
+
+  function keepDeletion(id, deletion) {
+    mergedDeletions[id] = deletion;
+  }
 
   for (const id of ids) {
     const local = localById.get(id);
     const remote = remoteById.get(id);
+    const localDeletion = localDatabase.deletedCards[id];
+    const remoteDeletion = remoteDatabase.deletedCards[id];
+
+    if (localDeletion || remoteDeletion) {
+      const deletion = !localDeletion
+        ? remoteDeletion
+        : !remoteDeletion
+          ? localDeletion
+          : localDeletion.deletedAt >= remoteDeletion.deletedAt
+            ? localDeletion
+            : remoteDeletion;
+      const card = local || remote;
+
+      if (!card) {
+        keepDeletion(id, deletion);
+        continue;
+      }
+
+      const cardChangedAfterSync = lastSyncedAt ? card.updatedAt > lastSyncedAt : true;
+      const deletionChangedAfterSync = lastSyncedAt ? deletion.deletedAt > lastSyncedAt : true;
+
+      if (cardChangedAfterSync && deletionChangedAfterSync) {
+        const conflictCopy = cloneCardAsConflict(card, timestamp);
+        conflicts.push(conflictCopy);
+        keepCard(conflictCopy);
+        keepDeletion(id, deletion);
+        continue;
+      }
+
+      if (deletionChangedAfterSync && !cardChangedAfterSync) {
+        keepDeletion(id, deletion);
+      } else if (cardChangedAfterSync && !deletionChangedAfterSync) {
+        keepCard(card);
+      } else if (deletion.deletedAt >= card.updatedAt) {
+        keepDeletion(id, deletion);
+      } else {
+        keepCard(card);
+      }
+      continue;
+    }
 
     if (!local && remote) {
-      merged.set(id, remote);
+      keepCard(remote);
       continue;
     }
     if (local && !remote) {
-      merged.set(id, local);
+      keepCard(local);
       continue;
     }
     if (!local || !remote) continue;
     if (cardsEqual(local, remote)) {
-      merged.set(id, local);
+      keepCard(local);
       continue;
     }
 
@@ -203,18 +303,19 @@ function mergeDatabases(localDb, remoteDb, lastSyncedAt) {
       const loser = localWins ? remote : local;
       const conflictCopy = cloneCardAsConflict(loser, timestamp);
       conflicts.push(conflictCopy);
-      merged.set(winner.id, winner);
-      merged.set(conflictCopy.id, conflictCopy);
+      keepCard(winner);
+      keepCard(conflictCopy);
       continue;
     }
 
-    merged.set(id, local.updatedAt >= remote.updatedAt ? local : remote);
+    keepCard(local.updatedAt >= remote.updatedAt ? local : remote);
   }
 
   return {
     database: normalizeDatabase({
-      ...localDb,
-      cards: Array.from(merged.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      ...localDatabase,
+      cards: Array.from(mergedCards.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      deletedCards: mergedDeletions,
       lastSavedAt: timestamp
     }),
     conflicts

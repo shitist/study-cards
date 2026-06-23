@@ -4,12 +4,12 @@
 
 ## 主要功能
 
-- 结构化卡片：概念、定义、遇到原因、解决范围、边界、验证方法。
+- 结构化卡片：概念、定义、遇到原因、解决范围、边界、验证方法、备注。
 - 分类目录：内置 `AI/LLM`、`历史`、`地理`，其中 `AI/LLM` 支持细分子类和自定义子类。
 - 标题搜索：搜索只匹配卡片标题，避免正文内容误命中过多结果。
 - 本地持久化：卡片保存为用户数据目录里的 JSON 文件。
 - 数据保护：写入采用临时文件加 rename；如果本地数据 JSON 损坏，会备份坏文件并暂停写入，避免空数据覆盖原文件。
-- Google Drive 同步：使用 `appDataFolder` 私有空间、PKCE OAuth、系统加密 token 存储和冲突副本保留。
+- Google Drive 多设备同步：使用 `appDataFolder` 私有空间、PKCE OAuth、系统加密 token 存储、每设备独立快照、删除墓碑和冲突副本保留。
 - 桌面交互：卡片可复制 Markdown，也可拖拽到 Word、Notepad++ 等文本文档类应用。
 - 主题：浅色、深色、跟随系统。
 
@@ -43,17 +43,27 @@ npm run typecheck
 npm run build
 ```
 
-`npm test` 覆盖核心数据逻辑，包括 schema 校验、稳定序列化、数据库归一化和同步冲突合并。
+`npm test` 覆盖核心数据逻辑，包括 schema 校验、稳定序列化、数据库归一化、OAuth 回调、构建配置和多设备快照冲突合并。
 
 生产构建会输出到 `dist/`。Electron 通过相对资源路径加载构建产物，适合 `loadFile()` 场景。
 
 ## Google Drive 同步设置
 
-1. 在 Google Cloud Console 创建 OAuth Client ID，应用类型选择 Desktop app。
-2. 在应用的同步设置里填写 Client ID。
-3. 点击登录并完成浏览器授权。
+OAuth 客户端配置不在普通用户界面中显示。开发或生成正式构建前，通过环境变量生成本地构建配置：
 
-同步数据保存在 Google Drive 的 `appDataFolder` 私有空间，不会出现在普通 Drive 文件列表里。OAuth refresh token 使用 Electron `safeStorage` 加密保存；旧版明文 token 会在读取时自动迁移为加密格式。
+```powershell
+$env:STUDY_CARDS_GOOGLE_CLIENT_ID="你的客户端 ID"
+$env:STUDY_CARDS_GOOGLE_CLIENT_SECRET="你的客户端密钥"
+npm run oauth:configure
+```
+
+命令会生成被 Git 忽略的 `electron/oauth-config.generated.cjs`。正式构建内置该配置后，用户只需点击“登录”，并在系统浏览器中完成 Google OAuth 授权。为兼容当前开发数据，旧版保存在本机设置中的加密 OAuth 配置仍可继续使用。
+
+登录后会在启动时自动同步；本地保存后约 2 秒自动同步；应用保持打开时每 5 分钟检查一次其他设备的更新。“立即同步”按钮继续作为手动兜底。
+
+同步数据保存在 Google Drive 的 `appDataFolder` 私有空间，不会出现在普通 Drive 文件列表里。旧版 `study-cards-data.json` 会作为只读迁移来源保留；新版为每个设备创建独立的 `study-cards-device-*.json` 快照。不同设备不会覆盖同一个远端文件，后续同步会合并所有设备快照，并通过删除墓碑和冲突副本避免静默丢失内容。
+
+refresh token 使用 Electron `safeStorage` 加密保存。系统凭据加密不可用时，应用会拒绝明文保存并显示中文处理提示。
 
 ## 数据位置与可靠性
 
@@ -69,12 +79,12 @@ npm run build
 cards.corrupt-2026-06-19T12-00-00-000Z.json
 ```
 
-这样可以避免“读取失败后显示空库，再误保存覆盖原数据”的风险。
+这样可以避免“读取失败后显示空库，再误保存覆盖原数据”的风险。数据库会自动从旧版结构迁移到 `schemaVersion: 2`；删除操作记录为同步墓碑，因此其他设备上的旧副本不会在后续同步中直接复活。
 
 ## 本地私有文件
 
-`local-notes/` 是本地计划和临时说明目录，已在 `.gitignore` 中忽略，不会上传到 GitHub。`node_modules/`、`dist/`、`release/`、`.env*` 也不会进入版本管理。
+`local-notes/` 是本地计划和临时说明目录，已在 `.gitignore` 中忽略，不会上传到 GitHub。`electron/oauth-config.generated.cjs`、`node_modules/`、`dist/`、`release/`、`.env*` 也不会进入版本管理。
 
 ## 当前状态
 
-这是一个本地优先的桌面学习卡片工具。核心数据逻辑已有单元测试，Google Drive OAuth 需要使用真实 Client ID 手动验证授权流程。
+这是一个本地优先的桌面学习卡片工具。核心数据、OAuth 回调和多设备快照合并已有单元测试；正式发布前仍需在两台真实设备上完成并发编辑与断网恢复验收。

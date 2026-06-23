@@ -12,7 +12,18 @@ export async function loadCards(): Promise<CardDatabase> {
   if (!raw) return createEmptyDatabase();
 
   try {
-    return JSON.parse(raw) as CardDatabase;
+    const parsed = JSON.parse(raw) as Partial<CardDatabase> & { schemaVersion?: number };
+    const fallback = createEmptyDatabase();
+    return {
+      schemaVersion: 2,
+      deviceId: typeof parsed.deviceId === "string" && parsed.deviceId ? parsed.deviceId : fallback.deviceId,
+      cards: Array.isArray(parsed.cards) ? parsed.cards : [],
+      deletedCards:
+        parsed.deletedCards && typeof parsed.deletedCards === "object" && !Array.isArray(parsed.deletedCards)
+          ? parsed.deletedCards
+          : {},
+      lastSavedAt: typeof parsed.lastSavedAt === "string" ? parsed.lastSavedAt : fallback.lastSavedAt
+    };
   } catch {
     localStorage.setItem(`${fallbackDatabaseKey}.corrupt.${Date.now()}`, raw);
     throw new Error("Browser preview card data is corrupt. Loading stopped to avoid overwriting it.");
@@ -34,7 +45,7 @@ export async function getStorageInfo(): Promise<StorageInfo | null> {
 export async function loadSettings(): Promise<AppSettings> {
   if (window.studyCards) return window.studyCards.loadSettings();
   const raw = localStorage.getItem(fallbackSettingsKey);
-  if (!raw) return { googleDriveClientId: "", syncEnabled: false, themePreference: "system" };
+  if (!raw) return { themePreference: "system" };
 
   let parsed: Partial<AppSettings>;
   try {
@@ -45,8 +56,6 @@ export async function loadSettings(): Promise<AppSettings> {
   }
 
   return {
-    googleDriveClientId: parsed.googleDriveClientId || "",
-    syncEnabled: Boolean(parsed.syncEnabled),
     themePreference: parsed.themePreference === "light" || parsed.themePreference === "dark" ? parsed.themePreference : "system"
   };
 }
@@ -60,7 +69,7 @@ export async function saveSettings(settings: Partial<AppSettings>): Promise<AppS
 }
 
 export async function getDriveStatus(): Promise<DriveStatus> {
-  if (!window.studyCards) return { configured: false, signedIn: false, syncEnabled: false, lastSyncedAt: null };
+  if (!window.studyCards) return { configured: false, signedIn: false, lastSyncedAt: null };
   return window.studyCards.getDriveStatus();
 }
 

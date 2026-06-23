@@ -776,6 +776,16 @@ button:disabled {
   font-weight: 750;
 }
 
+.sync-config-warning {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+}
 .theme-section {
   display: grid;
   gap: 9px;

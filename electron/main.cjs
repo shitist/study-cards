@@ -1,26 +1,42 @@
 const { app, BrowserWindow, ipcMain, safeStorage, shell } = require("electron");
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
-const http = require("node:http");
 const path = require("node:path");
 const {
   createEmptyDatabase,
-  mergeDatabases,
   normalizeDatabase,
   nowIso,
   validateCardDatabaseForSave
 } = require("./card-data.cjs");
+const {
+  DEVICE_FILE_PREFIX,
+  LEGACY_DRIVE_FILE_NAME,
+  databaseContentEqual,
+  deviceSnapshotName,
+  escapeDriveQueryLiteral,
+  isDriveDataFileName,
+  mergeDatabaseSnapshots
+} = require("./drive-sync-data.cjs");
+const { createOAuthCodeListener } = require("./oauth-listener.cjs");
+const { createOperationCoordinator } = require("./operation-coordinator.cjs");
+const { normalizeSyncState } = require("./sync-state.cjs");
+const { commitSyncPlan, recoverPendingSync } = require("./sync-transaction.cjs");
+const { createSettingsPayload, getBundledOAuthConfig } = require("./oauth-config.cjs");
 
-const DRIVE_FILE_NAME = "study-cards-data.json";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 const TOKEN_SKEW_MS = 60_000;
 const OAUTH_TIMEOUT_MS = 180_000;
+const DRIVE_RETRY_ATTEMPTS = 3;
+const DRIVE_RETRY_BASE_MS = 300;
 
 app.enableSandbox();
 
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
+
 let mainWindow = null;
 let databaseWriteBlockReason = "";
-let syncInFlight = null;
+const operationCoordinator = createOperationCoordinator();
 
 
 function getPaths() {
@@ -30,7 +46,8 @@ function getPaths() {
     data: path.join(userData, "cards.json"),
     settings: path.join(userData, "settings.json"),
     tokens: path.join(userData, "google-auth.json"),
-    syncState: path.join(userData, "sync-state.json")
+    syncState: path.join(userData, "sync-state.json"),
+    syncTransaction: path.join(userData, "sync-transaction.json")
   };
 }
 
@@ -54,7 +71,7 @@ async function readJson(filePath, fallback, options = {}) {
   try {
     raw = await fs.readFile(filePath, "utf8");
   } catch (error) {
-    if (error && error.code === "ENOENT") return fallback;
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return fallback;
     throw error;
   }
 
@@ -66,14 +83,17 @@ async function readJson(filePath, fallback, options = {}) {
       try {
         backupPath = await backupCorruptJson(filePath);
       } catch (backupError) {
-        const wrapped = new Error(`Local data file is corrupt and could not be backed up. Saving is blocked to avoid overwriting it. Original file: ${filePath}. Backup error: ${backupError.message}`);
-        wrapped.code = "CORRUPT_JSON";
+        const wrapped = Object.assign(
+          new Error(`Local data file is corrupt and could not be backed up. Saving is blocked to avoid overwriting it. Original file: ${filePath}. Backup error: ${backupError.message}`),
+          { code: "CORRUPT_JSON" }
+        );
         throw wrapped;
       }
 
-      const wrapped = new Error(`Local data file is corrupt. A backup was created at ${backupPath}. Saving is blocked to avoid overwriting it.`);
-      wrapped.code = "CORRUPT_JSON";
-      wrapped.backupPath = backupPath;
+      const wrapped = Object.assign(
+        new Error(`Local data file is corrupt. A backup was created at ${backupPath}. Saving is blocked to avoid overwriting it.`),
+        { code: "CORRUPT_JSON", backupPath }
+      );
       throw wrapped;
     }
     throw error;
@@ -125,31 +145,67 @@ async function saveDatabase(database, options = {}) {
   return saveDatabaseSnapshot(normalized);
 }
 
+async function readSettingsPayload() {
+  return readJson(getPaths().settings, {});
+}
+
 async function readSettings() {
-  const settings = await readJson(getPaths().settings, {});
+  const settings = await readSettingsPayload();
+  const themePreference =
+    settings.themePreference === "light" || settings.themePreference === "dark"
+      ? settings.themePreference
+      : "system";
+  const bundled = getBundledOAuthConfig();
+
+  if (
+    bundled.configured &&
+    (Object.prototype.hasOwnProperty.call(settings, "googleDriveClientId") ||
+      Object.prototype.hasOwnProperty.call(settings, "googleDriveClientSecret"))
+  ) {
+    await writeJson(getPaths().settings, createSettingsPayload(settings, themePreference, false));
+  }
+
+  return { themePreference };
+}
+async function readLegacyOAuthConfig() {
+  const settings = await readSettingsPayload();
+  const clientId = typeof settings.googleDriveClientId === "string" ? settings.googleDriveClientId.trim() : "";
+  const clientSecret = decryptClientSecret(settings.googleDriveClientSecret);
   return {
-    googleDriveClientId: typeof settings.googleDriveClientId === "string" ? settings.googleDriveClientId : "",
-    syncEnabled: Boolean(settings.syncEnabled),
-    themePreference: settings.themePreference === "light" || settings.themePreference === "dark" ? settings.themePreference : "system"
+    clientId,
+    clientSecret,
+    configured: Boolean(clientId && clientSecret),
+    source: "legacy-settings"
   };
+}
+
+async function getOAuthConfig() {
+  const bundled = getBundledOAuthConfig();
+  if (bundled.configured || bundled.clientId || bundled.clientSecret) return bundled;
+  return readLegacyOAuthConfig();
 }
 
 async function saveSettings(settings) {
-  const current = await readSettings();
-  const next = {
-    ...current,
-    ...settings,
-    googleDriveClientId: typeof settings.googleDriveClientId === "string" ? settings.googleDriveClientId.trim() : current.googleDriveClientId,
-    syncEnabled: typeof settings.syncEnabled === "boolean" ? settings.syncEnabled : current.syncEnabled,
-    themePreference: settings.themePreference === "light" || settings.themePreference === "dark" || settings.themePreference === "system" ? settings.themePreference : current.themePreference
-  };
-  await writeJson(getPaths().settings, next);
-  return next;
-}
+  const current = await readSettingsPayload();
+  const themePreference =
+    settings.themePreference === "light" ||
+    settings.themePreference === "dark" ||
+    settings.themePreference === "system"
+      ? settings.themePreference
+      : current.themePreference === "light" || current.themePreference === "dark"
+        ? current.themePreference
+        : "system";
+  const bundled = getBundledOAuthConfig();
 
+  await writeJson(
+    getPaths().settings,
+    createSettingsPayload(current, themePreference, !bundled.configured)
+  );
+  return { themePreference };
+}
 function encryptTokenPayload(tokens) {
   if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error("System credential encryption is unavailable. Google Drive login was not saved.");
+    throw new Error("系统凭据加密当前不可用，无法安全保存 Google Drive 登录信息。请重启应用并确认正在使用正常的 Windows 用户账户后重试；应用不会以明文保存令牌。");
   }
 
   return {
@@ -159,12 +215,26 @@ function encryptTokenPayload(tokens) {
   };
 }
 
+function decryptClientSecret(payload) {
+  if (!payload) return "";
+  if (typeof payload === "string") return payload;
+  if (payload.encrypted !== true || payload.encoding !== "base64" || typeof payload.data !== "string") {
+    throw new Error("保存的 Google OAuth 客户端密钥格式无效，请重新填写。");
+  }
+
+  try {
+    return safeStorage.decryptString(Buffer.from(payload.data, "base64"));
+  } catch {
+    throw new Error("无法解密 Google OAuth 客户端密钥，请重新填写。");
+  }
+}
+
 function decryptTokenPayload(payload) {
   if (!payload) return null;
 
   if (payload.encrypted === true) {
     if (payload.encoding !== "base64" || typeof payload.data !== "string") {
-      throw new Error("Stored Google Drive credentials are invalid.");
+      throw new Error("保存的 Google Drive 登录信息格式无效，请断开连接后重新登录。");
     }
     const decrypted = safeStorage.decryptString(Buffer.from(payload.data, "base64"));
     return JSON.parse(decrypted);
@@ -195,11 +265,27 @@ async function clearTokens() {
 }
 
 async function readSyncState() {
-  return readJson(getPaths().syncState, {});
+  return normalizeSyncState(await readJson(getPaths().syncState, {}));
 }
 
 async function saveSyncState(state) {
-  await writeJson(getPaths().syncState, state);
+  await writeJson(getPaths().syncState, normalizeSyncState(state));
+}
+
+async function readSyncTransaction() {
+  return readJson(getPaths().syncTransaction, null);
+}
+
+async function saveSyncTransaction(transaction) {
+  await writeJson(getPaths().syncTransaction, transaction);
+}
+
+async function clearSyncTransaction() {
+  try {
+    await fs.unlink(getPaths().syncTransaction);
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+  }
 }
 
 function createWindow() {
@@ -235,74 +321,10 @@ function generatePkce() {
   return { verifier, challenge };
 }
 
-async function createOAuthCodeListener(expectedState) {
-  let settled = false;
-  let timeout = null;
-  let finish = null;
-
-  const server = http.createServer((request, response) => {
-    try {
-      const address = server.address();
-      const redirectUri = `http://127.0.0.1:${address.port}`;
-      const requestUrl = new URL(request.url, redirectUri);
-      const code = requestUrl.searchParams.get("code");
-      const state = requestUrl.searchParams.get("state");
-      const error = requestUrl.searchParams.get("error");
-
-      if (error) {
-        response.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-        response.end("<h1>Google Drive login failed</h1><p>You can close this window.</p>");
-        finish(new Error(error));
-        return;
-      }
-
-      if (!code || state !== expectedState) {
-        response.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-        response.end("<h1>Invalid login response</h1><p>You can close this window.</p>");
-        finish(new Error("OAuth response was missing code or had invalid state."));
-        return;
-      }
-
-      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      response.end("<h1>Google Drive connected</h1><p>You can return to the study card app.</p>");
-      finish(null, code);
-    } catch (error) {
-      finish(error);
-    }
-  });
-
-  const codePromise = new Promise((resolve, reject) => {
-    finish = (error, code) => {
-      if (settled) return;
-      settled = true;
-      if (timeout) clearTimeout(timeout);
-      server.close(() => (error ? reject(error) : resolve(code)));
-    };
-    server.on("error", (error) => finish(error));
-  });
-
-  await new Promise((resolve, reject) => {
-    const onError = (error) => reject(error);
-    server.once("error", onError);
-    server.listen(0, "127.0.0.1", () => {
-      server.off("error", onError);
-      resolve();
-    });
-  });
-
-  const address = server.address();
-  const redirectUri = `http://127.0.0.1:${address.port}`;
-  timeout = setTimeout(() => {
-    finish(new Error("Google Drive login timed out. Please try again."));
-  }, OAUTH_TIMEOUT_MS);
-  if (typeof timeout.unref === "function") timeout.unref();
-
-  return { redirectUri, codePromise };
-}
-
-async function exchangeCodeForTokens({ clientId, code, redirectUri, verifier }) {
+async function exchangeCodeForTokens({ clientId, clientSecret, code, redirectUri, verifier }) {
   const body = new URLSearchParams({
     client_id: clientId,
+    client_secret: clientSecret,
     code,
     code_verifier: verifier,
     grant_type: "authorization_code",
@@ -316,7 +338,7 @@ async function exchangeCodeForTokens({ clientId, code, redirectUri, verifier }) 
   });
 
   if (!response.ok) {
-    throw new Error(`Google token exchange failed: ${response.status} ${await response.text()}`);
+    throw new Error(`Google 登录失败：无法交换访问令牌（HTTP ${response.status}）。${await response.text()}`);
   }
 
   const tokens = await response.json();
@@ -329,13 +351,14 @@ async function exchangeCodeForTokens({ clientId, code, redirectUri, verifier }) 
   };
 }
 
-async function refreshAccessToken(settings, tokens) {
+async function refreshAccessToken(oauthConfig, tokens) {
   if (!tokens || !tokens.refresh_token) {
     throw new Error("Google Drive 需要重新登录。没有可用的 refresh token。");
   }
 
   const body = new URLSearchParams({
-    client_id: settings.googleDriveClientId,
+    client_id: oauthConfig.clientId,
+    client_secret: oauthConfig.clientSecret,
     refresh_token: tokens.refresh_token,
     grant_type: "refresh_token"
   });
@@ -347,7 +370,7 @@ async function refreshAccessToken(settings, tokens) {
   });
 
   if (!response.ok) {
-    throw new Error(`Google token refresh failed: ${response.status} ${await response.text()}`);
+    throw new Error(`Google 登录已失效：无法刷新访问令牌（HTTP ${response.status}）。${await response.text()}`);
   }
 
   const next = await response.json();
@@ -362,211 +385,289 @@ async function refreshAccessToken(settings, tokens) {
 }
 
 async function getValidTokens() {
-  const settings = await readSettings();
+  const oauthConfig = await getOAuthConfig();
   const tokens = await readTokens();
 
-  if (!settings.googleDriveClientId) {
-    throw new Error("请先填写 Google OAuth Client ID。");
+  if (!oauthConfig.configured) {
+    throw new Error("当前版本尚未配置 Google OAuth，请使用带有内置 OAuth 配置的正式构建。");
   }
   if (!tokens || !tokens.access_token) {
     throw new Error("请先登录 Google Drive。");
   }
   if (!tokens.expiry_date || Date.now() + TOKEN_SKEW_MS >= tokens.expiry_date) {
-    return refreshAccessToken(settings, tokens);
+    return refreshAccessToken(oauthConfig, tokens);
   }
   return tokens;
 }
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
 
 async function driveFetch(url, options = {}) {
+  const method = String(options.method || "GET").toUpperCase();
+  const retryable = method === "GET" || method === "PATCH";
+  let transientAttempt = 0;
   let tokens = await getValidTokens();
-  let response = await fetch(url, {
-    ...options,
-    headers: {
-      ...(options.headers || {}),
-      Authorization: `Bearer ${tokens.access_token}`
-    }
-  });
+  let authenticationRetried = false;
 
-  if (response.status === 401) {
-    const settings = await readSettings();
-    tokens = await refreshAccessToken(settings, await readTokens());
-    response = await fetch(url, {
-      ...options,
-      headers: {
-        ...(options.headers || {}),
-        Authorization: `Bearer ${tokens.access_token}`
+  while (true) {
+    let response;
+    try {
+      response = await fetch(url, {
+        ...options,
+        headers: {
+          ...(options.headers || {}),
+          Authorization: "Bearer " + tokens.access_token
+        }
+      });
+    } catch (error) {
+      if (retryable && transientAttempt + 1 < DRIVE_RETRY_ATTEMPTS) {
+        await wait(DRIVE_RETRY_BASE_MS * 3 ** transientAttempt);
+        transientAttempt += 1;
+        continue;
       }
-    });
-  }
+      throw error;
+    }
 
-  if (!response.ok) {
-    throw new Error(`Google Drive request failed: ${response.status} ${await response.text()}`);
-  }
+    if (response.status === 401 && !authenticationRetried) {
+      const oauthConfig = await getOAuthConfig();
+      tokens = await refreshAccessToken(oauthConfig, await readTokens());
+      authenticationRetried = true;
+      continue;
+    }
 
-  return response;
+    if (
+      retryable &&
+      (response.status === 429 || response.status >= 500) &&
+      transientAttempt + 1 < DRIVE_RETRY_ATTEMPTS
+    ) {
+      await response.arrayBuffer();
+      await wait(DRIVE_RETRY_BASE_MS * 3 ** transientAttempt);
+      transientAttempt += 1;
+      continue;
+    }
+
+    if (!response.ok) {
+      const details = await response.text();
+      const error = new Error(
+        "Google Drive 请求失败：HTTP " + response.status + (details ? " - " + details : "")
+      );
+      throw Object.assign(error, { status: response.status });
+    }
+
+    return response;
+  }
 }
-
-async function findDriveDataFile() {
-  const query = encodeURIComponent(`name='${DRIVE_FILE_NAME}' and trashed=false`);
-  const fields = encodeURIComponent("files(id,name,modifiedTime,version)");
-  const url = `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${query}&fields=${fields}`;
+async function listDriveDataFiles() {
+  const query = encodeURIComponent(
+    "(name='" + escapeDriveQueryLiteral(LEGACY_DRIVE_FILE_NAME) + "' or name contains '" + escapeDriveQueryLiteral(DEVICE_FILE_PREFIX) + "') and trashed=false"
+  );
+  const fields = encodeURIComponent("nextPageToken,files(id,name,modifiedTime,version,trashed)");
+  const orderBy = encodeURIComponent("name");
+  const url =
+    "https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=" + query +
+    "&orderBy=" + orderBy + "&pageSize=100&fields=" + fields;
   const response = await driveFetch(url);
   const payload = await response.json();
-  return Array.isArray(payload.files) && payload.files.length > 0 ? payload.files[0] : null;
+
+  return {
+    files: Array.isArray(payload.files)
+      ? payload.files.filter((file) => file && isDriveDataFileName(file.name) && file.trashed !== true)
+      : [],
+    hasMore: typeof payload.nextPageToken === "string" && payload.nextPageToken.length > 0
+  };
 }
 
-async function downloadDriveDatabase(fileId) {
-  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
-  return normalizeDatabase(await response.json());
+async function downloadDriveDatabase(file) {
+  try {
+    const response = await driveFetch(
+      "https://www.googleapis.com/drive/v3/files/" + encodeURIComponent(file.id) + "?alt=media"
+    );
+    return normalizeDatabase(await response.json());
+  } catch (error) {
+    throw new Error("无法读取 Google Drive 同步快照 " + file.name + "：" + error.message);
+  }
 }
 
-async function createDriveDatabase(database) {
-  const boundary = `study-cards-${crypto.randomUUID()}`;
+async function createDriveDatabase(fileName, database) {
+  const boundary = "study-cards-" + crypto.randomUUID();
   const metadata = {
-    name: DRIVE_FILE_NAME,
+    name: fileName,
     parents: ["appDataFolder"],
     mimeType: "application/json"
   };
   const body = [
-    `--${boundary}`,
+    "--" + boundary,
     "Content-Type: application/json; charset=UTF-8",
     "",
     JSON.stringify(metadata),
-    `--${boundary}`,
+    "--" + boundary,
     "Content-Type: application/json; charset=UTF-8",
     "",
     JSON.stringify(database),
-    `--${boundary}--`,
+    "--" + boundary + "--",
     ""
   ].join("\r\n");
 
-  const fields = encodeURIComponent("id,modifiedTime,version");
-  const response = await driveFetch(`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=${fields}`, {
-    method: "POST",
-    headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
-    body
-  });
+  const fields = encodeURIComponent("id,name,modifiedTime,version");
+  const response = await driveFetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=" + fields,
+    {
+      method: "POST",
+      headers: { "Content-Type": "multipart/related; boundary=" + boundary },
+      body
+    }
+  );
   return response.json();
 }
 
 async function updateDriveDatabase(fileId, database) {
-  const fields = encodeURIComponent("id,modifiedTime,version");
-  const response = await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&fields=${fields}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json; charset=UTF-8" },
-    body: JSON.stringify(database)
-  });
+  const fields = encodeURIComponent("id,name,modifiedTime,version");
+  const response = await driveFetch(
+    "https://www.googleapis.com/upload/drive/v3/files/" +
+      encodeURIComponent(fileId) +
+      "?uploadType=media&fields=" +
+      fields,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json; charset=UTF-8" },
+      body: JSON.stringify(database)
+    }
+  );
   return response.json();
 }
 
+function assertValidSnapshotListing(listing, ownFileName) {
+  if (listing.hasMore) {
+    throw new Error("Google Drive 同步快照超过 100 个，本次同步已停止，请先检查远端应用数据。");
+  }
+
+  const legacyFiles = listing.files.filter((file) => file.name === LEGACY_DRIVE_FILE_NAME);
+  if (legacyFiles.length > 1) {
+    throw new Error("Google Drive 私有空间中发现多个 " + LEGACY_DRIVE_FILE_NAME + "，本次同步已停止。");
+  }
+
+  const ownFiles = listing.files.filter((file) => file.name === ownFileName);
+  if (ownFiles.length > 1) {
+    throw new Error("当前设备在 Google Drive 中存在多个同步快照 " + ownFileName + "，本次同步已停止。");
+  }
+
+  return ownFiles[0] || null;
+}
+
 async function performDriveSync() {
+  await recoverPendingSync({
+    readTransaction: readSyncTransaction,
+    loadLocal: loadDatabase,
+    saveLocal: saveDatabaseSnapshot,
+    saveState: saveSyncState,
+    clearTransaction: clearSyncTransaction,
+    nowIso
+  });
+
   const localDb = normalizeDatabase(await loadDatabase());
   const state = await readSyncState();
-  const remoteFile = await findDriveDataFile();
   const syncStartedAt = nowIso();
+  const ownFileName = deviceSnapshotName(localDb.deviceId);
+  const listing = await listDriveDataFiles();
+  const ownFile = assertValidSnapshotListing(listing, ownFileName);
+  const orderedFiles = [...listing.files].sort((left, right) =>
+    (left.name + ":" + left.id).localeCompare(right.name + ":" + right.id)
+  );
 
-  if (!remoteFile) {
-    const created = await createDriveDatabase(localDb);
-    await saveSyncState({
-      remoteFileId: created.id,
-      remoteVersion: created.version,
-      lastSyncedAt: syncStartedAt,
-      lastSyncedLocalSavedAt: localDb.lastSavedAt
-    });
-    return { action: "uploaded", database: localDb, conflicts: 0, message: "已创建 Google Drive 同步文件。" };
+  const downloadedSnapshots = [];
+  let ownRemoteDatabase = null;
+  for (const file of orderedFiles) {
+    const database = await downloadDriveDatabase(file);
+    downloadedSnapshots.push(database);
+    if (ownFile && file.id === ownFile.id) ownRemoteDatabase = database;
   }
 
-  const remoteDb = await downloadDriveDatabase(remoteFile.id);
-  const hasPreviousSync = Boolean(state.remoteVersion || state.lastSyncedAt);
+  const merged = mergeDatabaseSnapshots(localDb, downloadedSnapshots, state.lastSyncedAt || null);
+  const contentChanged = !databaseContentEqual(localDb, merged.database);
+  const nextDb = contentChanged
+    ? normalizeDatabase({ ...merged.database, deviceId: localDb.deviceId, lastSavedAt: syncStartedAt })
+    : localDb;
   const localChanged = state.lastSyncedLocalSavedAt !== localDb.lastSavedAt;
-  const remoteChanged = state.remoteVersion !== remoteFile.version;
+  const ownSnapshotOutdated = !ownRemoteDatabase || !databaseContentEqual(ownRemoteDatabase, nextDb);
+  const shouldUpload = !ownFile || localChanged || contentChanged || ownSnapshotOutdated;
 
-  let nextDb = localDb;
-  let action = "noop";
-  let conflicts = 0;
-  let uploadedMetadata = remoteFile;
-  let shouldSaveLocal = false;
+  const committed = await commitSyncPlan(
+    {
+      localDatabase: localDb,
+      nextDatabase: nextDb,
+      contentChanged,
+      shouldUpload,
+      ownFile,
+      ownFileName,
+      syncStartedAt,
+      previousSyncState: state
+    },
+    {
+      saveTransaction: saveSyncTransaction,
+      upload: async () => {
+        const uploadedMetadata = ownFile
+          ? await updateDriveDatabase(ownFile.id, nextDb)
+          : await createDriveDatabase(ownFileName, nextDb);
 
-  if (!hasPreviousSync) {
-    if (localDb.cards.length === 0 && remoteDb.cards.length > 0) {
-      nextDb = normalizeDatabase({ ...remoteDb, lastSavedAt: syncStartedAt });
-      shouldSaveLocal = true;
-      action = "downloaded";
-    } else if (remoteDb.cards.length === 0 && localDb.cards.length > 0) {
-      uploadedMetadata = await updateDriveDatabase(remoteFile.id, localDb);
-      action = "uploaded";
-    } else {
-      const merged = mergeDatabases(localDb, remoteDb, state.lastSyncedAt);
-      nextDb = normalizeDatabase({ ...merged.database, lastSavedAt: syncStartedAt });
-      uploadedMetadata = await updateDriveDatabase(remoteFile.id, nextDb);
-      shouldSaveLocal = true;
-      conflicts = merged.conflicts.length;
-      action = conflicts > 0 ? "merged-with-conflicts" : "merged";
+        if (!ownFile) {
+          const verifiedListing = await listDriveDataFiles();
+          const verifiedOwnFile = assertValidSnapshotListing(verifiedListing, ownFileName);
+          if (!verifiedOwnFile || verifiedOwnFile.id !== uploadedMetadata.id) {
+            throw new Error("创建当前设备的 Google Drive 同步快照后校验失败，本次同步已停止。");
+          }
+        }
+
+        return uploadedMetadata;
+      },
+      saveLocal: saveDatabaseSnapshot,
+      saveState: saveSyncState,
+      clearTransaction: clearSyncTransaction
     }
-  } else if (localChanged && !remoteChanged) {
-    uploadedMetadata = await updateDriveDatabase(remoteFile.id, localDb);
-    action = "uploaded";
-  } else if (!localChanged && remoteChanged) {
-    nextDb = normalizeDatabase({ ...remoteDb, lastSavedAt: syncStartedAt });
-    shouldSaveLocal = true;
-    action = "downloaded";
-  } else if (localChanged && remoteChanged) {
-    const merged = mergeDatabases(localDb, remoteDb, state.lastSyncedAt);
-    nextDb = normalizeDatabase({ ...merged.database, lastSavedAt: syncStartedAt });
-    uploadedMetadata = await updateDriveDatabase(remoteFile.id, nextDb);
-    shouldSaveLocal = true;
-    conflicts = merged.conflicts.length;
-    action = conflicts > 0 ? "merged-with-conflicts" : "merged";
-  }
+  );
+  const finalDb = committed.finalDatabase;
 
-  if (shouldSaveLocal) {
-    nextDb = await saveDatabaseSnapshot(nextDb);
-  }
-
-  await saveSyncState({
-    remoteFileId: remoteFile.id,
-    remoteVersion: uploadedMetadata.version || remoteFile.version,
-    lastSyncedAt: syncStartedAt,
-    lastSyncedLocalSavedAt: nextDb.lastSavedAt
-  });
+  let action = "noop";
+  if (merged.conflicts.length > 0) action = "merged-with-conflicts";
+  else if (contentChanged && localChanged) action = "merged";
+  else if (contentChanged) action = "downloaded";
+  else if (shouldUpload) action = "uploaded";
 
   return {
     action,
-    database: nextDb,
-    conflicts,
-    message: conflicts > 0 ? "同步完成，并保留了冲突副本。" : "同步完成。"
+    database: finalDb,
+    conflicts: merged.conflicts.length,
+    message: merged.conflicts.length > 0 ? "同步完成，并保留了冲突副本。" : "同步完成。"
   };
 }
-
 async function getDriveStatus() {
-  const settings = await readSettings();
+  const oauthConfig = await getOAuthConfig();
   const tokens = await readTokens();
   const syncState = await readSyncState();
   return {
-    configured: Boolean(settings.googleDriveClientId),
+    configured: oauthConfig.configured,
     signedIn: Boolean(tokens && tokens.refresh_token),
-    syncEnabled: settings.syncEnabled,
     lastSyncedAt: syncState.lastSyncedAt || null
   };
 }
-
 ipcMain.handle("cards:load", async () => loadDatabase());
-ipcMain.handle("cards:save", async (_event, database) => saveDatabase(database, { validate: true }));
-ipcMain.handle("cards:getStorageInfo", async () => ({ dataPath: getPaths().data, userDataPath: getPaths().userData }));
+ipcMain.handle("cards:save", async (_event, database) =>
+  operationCoordinator.runSave(() => saveDatabase(database, { validate: true }))
+);ipcMain.handle("cards:getStorageInfo", async () => ({ dataPath: getPaths().data, userDataPath: getPaths().userData }));
 ipcMain.handle("settings:load", async () => readSettings());
 ipcMain.handle("settings:save", async (_event, settings) => saveSettings(settings));
 ipcMain.handle("drive:status", async () => getDriveStatus());
 ipcMain.handle("drive:signIn", async () => {
-  const settings = await readSettings();
-  if (!settings.googleDriveClientId) {
-    throw new Error("请先填写 Google OAuth Client ID。");
+  const oauthConfig = await getOAuthConfig();
+  if (!oauthConfig.configured) {
+    throw new Error("当前版本尚未配置 Google OAuth，请使用带有内置 OAuth 配置的正式构建。");
   }
 
   const { verifier, challenge } = generatePkce();
   const state = crypto.randomUUID();
-  const { redirectUri, codePromise } = await createOAuthCodeListener(state);
+  const { redirectUri, codePromise } = await createOAuthCodeListener(state, { timeoutMs: OAUTH_TIMEOUT_MS });
   const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-  authUrl.searchParams.set("client_id", settings.googleDriveClientId);
+  authUrl.searchParams.set("client_id", oauthConfig.clientId);
   authUrl.searchParams.set("redirect_uri", redirectUri);
   authUrl.searchParams.set("response_type", "code");
   authUrl.searchParams.set("scope", DRIVE_SCOPE);
@@ -578,30 +679,38 @@ ipcMain.handle("drive:signIn", async () => {
 
   await shell.openExternal(authUrl.toString());
   const code = await codePromise;
-  const tokens = await exchangeCodeForTokens({ clientId: settings.googleDriveClientId, code, redirectUri, verifier });
+  const tokens = await exchangeCodeForTokens({
+    clientId: oauthConfig.clientId,
+    clientSecret: oauthConfig.clientSecret,
+    code,
+    redirectUri,
+    verifier
+  });
   await saveTokens(tokens);
-  await saveSettings({ syncEnabled: true });
   return getDriveStatus();
 });
 ipcMain.handle("drive:signOut", async () => {
   await clearTokens();
-  await saveSettings({ syncEnabled: false });
   return getDriveStatus();
 });
-ipcMain.handle("drive:sync", async () => {
-  if (syncInFlight) return syncInFlight;
-  syncInFlight = performDriveSync().finally(() => {
-    syncInFlight = null;
+ipcMain.handle("drive:sync", async () =>
+  operationCoordinator.runSync(() => performDriveSync())
+);
+
+if (hasSingleInstanceLock) {
+  app.on("second-instance", () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
   });
-  return syncInFlight;
-});
 
-app.whenReady().then(createWindow);
+  app.whenReady().then(createWindow);
 
-app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
-});
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") app.quit();
+  });
+}
