@@ -5,5 +5,4 @@ dist/
 .env
 .env.local
 release/
-electron/oauth-config.generated.cjs
 .codex/
