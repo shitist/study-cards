@@ -46,7 +46,6 @@ async function createOAuthCodeListener(expectedState, options = {}) {
           Connection: "close"
         });
         response.end("<h1>Invalid login response</h1><p>You can close this window.</p>");
-        settle(new Error("OAuth response was missing code or had invalid state."));
         return;
       }
 

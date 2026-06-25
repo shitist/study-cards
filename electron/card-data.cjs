@@ -142,7 +142,7 @@ function normalizeDatabase(value) {
   return {
     schemaVersion: 2,
     deviceId,
-    cards: activeCards,
+    cards: pruneObsoleteConflictCopies(activeCards),
     deletedCards,
     lastSavedAt: typeof value.lastSavedAt === "string" ? value.lastSavedAt : nowIso()
   };
@@ -210,6 +210,51 @@ function cloneCardAsConflict(card, timestamp) {
     concept: `${copy.fields.concept || "\u672a\u547d\u540d\u5361\u7247"}${CONFLICT_SUFFIX}`
   };
   return copy;
+}
+
+function getOrderedHistory(card) {
+  const history = Array.isArray(card.updateHistory)
+    ? card.updateHistory.filter((item) => typeof item === "string" && item.length > 0)
+    : [];
+  const withUpdatedAt = history.includes(card.updatedAt) ? history : [...history, card.updatedAt];
+  return [...new Set(withUpdatedAt)];
+}
+
+function isHistoryAncestor(ancestor, descendant) {
+  if (ancestor.updatedAt >= descendant.updatedAt) return false;
+
+  const ancestorHistory = getOrderedHistory(ancestor);
+  const descendantHistory = getOrderedHistory(descendant);
+  if (ancestorHistory.length >= descendantHistory.length) return false;
+
+  return ancestorHistory.every((entry, index) => descendantHistory[index] === entry);
+}
+
+function getHistoryDescendant(local, remote) {
+  if (isHistoryAncestor(remote, local)) return local;
+  if (isHistoryAncestor(local, remote)) return remote;
+  return null;
+}
+
+function getConflictBaseHistory(card) {
+  const history = getOrderedHistory(card);
+  return history[history.length - 1] === card.updatedAt ? history.slice(0, -1) : history;
+}
+
+function isHistoryPrefix(prefix, history) {
+  if (prefix.length === 0 || prefix.length >= history.length) return false;
+  return prefix.every((entry, index) => history[index] === entry);
+}
+
+function isObsoleteAncestorConflictCopy(card, original) {
+  if (!original || card.conflictOf !== original.id) return false;
+  if (!card.fields.concept.endsWith(CONFLICT_SUFFIX)) return false;
+  return isHistoryPrefix(getConflictBaseHistory(card), getOrderedHistory(original));
+}
+
+function pruneObsoleteConflictCopies(cards) {
+  const byId = new Map(cards.map((card) => [card.id, card]));
+  return cards.filter((card) => !isObsoleteAncestorConflictCopy(card, byId.get(card.conflictOf)));
 }
 
 function mergeDatabases(localDb, remoteDb, lastSyncedAt) {
@@ -291,6 +336,12 @@ function mergeDatabases(localDb, remoteDb, lastSyncedAt) {
     if (!local || !remote) continue;
     if (cardsEqual(local, remote)) {
       keepCard(local);
+      continue;
+    }
+
+    const historyDescendant = getHistoryDescendant(local, remote);
+    if (historyDescendant) {
+      keepCard(historyDescendant);
       continue;
     }
 

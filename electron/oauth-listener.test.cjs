@@ -34,9 +34,10 @@ test("OAuth callback resolves without waiting for the browser connection to clos
   }
 });
 
-test("OAuth callback rejects an invalid state", async () => {
-  const { redirectUri, codePromise } = await createOAuthCodeListener("expected-state", { timeoutMs: 1_000 });
-  const responsePromise = new Promise((resolve, reject) => {
+test("OAuth callback ignores an invalid state and keeps waiting", async () => {
+  const state = "expected-state";
+  const { redirectUri, codePromise } = await createOAuthCodeListener(state, { timeoutMs: 1_000 });
+  const invalidResponsePromise = new Promise((resolve, reject) => {
     const requestUrl = redirectUri + "/?code=authorization-code&state=wrong-state";
     const request = http.get(requestUrl, (response) => {
       response.resume();
@@ -45,7 +46,26 @@ test("OAuth callback rejects an invalid state", async () => {
     request.on("error", reject);
   });
 
-  await assert.rejects(codePromise, /invalid state/);
-  const response = await responsePromise;
-  assert.equal(response.statusCode, 400);
+  const invalidResponse = await invalidResponsePromise;
+  assert.equal(invalidResponse.statusCode, 400);
+
+  const pending = await Promise.race([
+    codePromise.then(() => "settled"),
+    new Promise((resolve) => setTimeout(() => resolve("pending"), 50))
+  ]);
+  assert.equal(pending, "pending");
+
+  const validResponsePromise = new Promise((resolve, reject) => {
+    const requestUrl = redirectUri + "/?code=authorization-code&state=" + state;
+    const request = http.get(requestUrl, (response) => {
+      response.resume();
+      response.on("end", () => resolve(response));
+    });
+    request.on("error", reject);
+  });
+
+  const code = await codePromise;
+  const validResponse = await validResponsePromise;
+  assert.equal(code, "authorization-code");
+  assert.equal(validResponse.statusCode, 200);
 });

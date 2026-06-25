@@ -98,6 +98,54 @@ test("normalizeDatabase keeps only the newer state when a card and tombstone coe
   assert.equal(Object.prototype.hasOwnProperty.call(restored.deletedCards, "card-1"), false);
 });
 
+test("normalizeDatabase removes obsolete ancestor conflict copies", () => {
+  const commonUpdatedAt = "2026-01-02T00:00:00.000Z";
+  const originalUpdatedAt = "2026-01-03T00:00:00.000Z";
+  const conflictCreatedAt = "2026-01-04T00:00:00.000Z";
+  const original = makeCard({
+    id: "same-card",
+    updatedAt: originalUpdatedAt,
+    updateHistory: [CREATED_AT, commonUpdatedAt, originalUpdatedAt],
+    fields: makeFields({ concept: "GGUF", encounteredBecause: "newer wording" })
+  });
+  const obsoleteConflict = makeCard({
+    id: "obsolete-conflict",
+    conflictOf: "same-card",
+    updatedAt: conflictCreatedAt,
+    updateHistory: [CREATED_AT, commonUpdatedAt, conflictCreatedAt],
+    fields: makeFields({ concept: `GGUF${CONFLICT_SUFFIX}`, encounteredBecause: "older wording" })
+  });
+
+  const normalized = normalizeDatabase(makeDatabase([obsoleteConflict, original]));
+
+  assert.equal(normalized.cards.length, 1);
+  assert.equal(normalized.cards[0].id, "same-card");
+});
+
+test("normalizeDatabase keeps divergent conflict copies", () => {
+  const localUpdatedAt = "2026-01-03T00:00:00.000Z";
+  const remoteUpdatedAt = "2026-01-04T00:00:00.000Z";
+  const conflictCreatedAt = "2026-01-05T00:00:00.000Z";
+  const original = makeCard({
+    id: "same-card",
+    updatedAt: localUpdatedAt,
+    updateHistory: [CREATED_AT, localUpdatedAt],
+    fields: makeFields({ concept: "local edit" })
+  });
+  const conflict = makeCard({
+    id: "real-conflict",
+    conflictOf: "same-card",
+    updatedAt: conflictCreatedAt,
+    updateHistory: [CREATED_AT, remoteUpdatedAt, conflictCreatedAt],
+    fields: makeFields({ concept: `remote edit${CONFLICT_SUFFIX}` })
+  });
+
+  const normalized = normalizeDatabase(makeDatabase([conflict, original]));
+
+  assert.equal(normalized.cards.length, 2);
+  assert.equal(normalized.cards.some((card) => card.id === "real-conflict"), true);
+});
+
 test("validateCardDatabaseForSave rejects unknown database, card, field, and tombstone keys", () => {
   const valid = makeDatabase([makeCard()]);
   assert.doesNotThrow(() => validateCardDatabaseForSave(valid));
@@ -240,6 +288,62 @@ test("mergeDatabases treats lastSyncedAt null as a conflict and preserves the lo
   assert.equal(result.database.cards.length, 2);
   assert.ok(result.database.cards.some((card) => card.id === "same-card" && card.fields.concept === "remote edit"));
   assert.equal(conflictCopy.fields.concept, `local edit${CONFLICT_SUFFIX}`);
+});
+
+test("mergeDatabases keeps a history descendant without creating a first-sync conflict", () => {
+  const remoteUpdatedAt = "2026-01-02T00:00:00.000Z";
+  const localUpdatedAt = "2026-01-03T00:00:00.000Z";
+  const local = makeCard({
+    id: "same-card",
+    updatedAt: localUpdatedAt,
+    updateHistory: [CREATED_AT, remoteUpdatedAt, localUpdatedAt],
+    fields: makeFields({ concept: "newer local version" })
+  });
+  const remote = makeCard({
+    id: "same-card",
+    updatedAt: remoteUpdatedAt,
+    updateHistory: [CREATED_AT, remoteUpdatedAt],
+    fields: makeFields({ concept: "older remote version" })
+  });
+
+  const result = mergeDatabases(
+    makeDatabase([local]),
+    makeDatabase([remote], { deviceId: "device-2" }),
+    null
+  );
+
+  assert.equal(result.conflicts.length, 0);
+  assert.equal(result.database.cards.length, 1);
+  assert.equal(result.database.cards[0].fields.concept, "newer local version");
+  assert.equal(result.database.cards[0].updatedAt, localUpdatedAt);
+});
+
+test("mergeDatabases keeps a remote history descendant without creating a first-sync conflict", () => {
+  const localUpdatedAt = "2026-01-02T00:00:00.000Z";
+  const remoteUpdatedAt = "2026-01-03T00:00:00.000Z";
+  const local = makeCard({
+    id: "same-card",
+    updatedAt: localUpdatedAt,
+    updateHistory: [CREATED_AT, localUpdatedAt],
+    fields: makeFields({ concept: "older local version" })
+  });
+  const remote = makeCard({
+    id: "same-card",
+    updatedAt: remoteUpdatedAt,
+    updateHistory: [CREATED_AT, localUpdatedAt, remoteUpdatedAt],
+    fields: makeFields({ concept: "newer remote version" })
+  });
+
+  const result = mergeDatabases(
+    makeDatabase([local]),
+    makeDatabase([remote], { deviceId: "device-2" }),
+    null
+  );
+
+  assert.equal(result.conflicts.length, 0);
+  assert.equal(result.database.cards.length, 1);
+  assert.equal(result.database.cards[0].fields.concept, "newer remote version");
+  assert.equal(result.database.cards[0].updatedAt, remoteUpdatedAt);
 });
 
 test("mergeDatabases takes the remote card without conflict when only remote changed", () => {

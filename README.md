@@ -15,7 +15,7 @@
 
 ## 技术栈
 
-- Electron 38
+- Electron 42
 - React 19
 - TypeScript
 - Vite 7
@@ -41,11 +41,12 @@ npm run dev
 npm test
 npm run typecheck
 npm run build
+npm run package:win
 ```
 
 `npm test` 覆盖核心数据逻辑，包括 schema 校验、稳定序列化、数据库归一化、OAuth 回调、构建配置和多设备快照冲突合并。
 
-生产构建会输出到 `dist/`。Electron 通过相对资源路径加载构建产物，适合 `loadFile()` 场景。
+生产构建会输出到 `dist/`。Electron 通过相对资源路径加载构建产物，适合 `loadFile()` 场景。`npm run package:win` 会使用 electron-builder 生成 Windows x64 安装包，并保留 `win-unpacked/` 目录用于快速测试，产物输出到 `release/`。不再默认生成 portable 单文件 exe，因为它每次启动都要自解压，冷启动明显更慢。
 
 ## Google Drive 同步设置
 
@@ -57,13 +58,13 @@ $env:STUDY_CARDS_GOOGLE_CLIENT_SECRET="你的客户端密钥"
 npm run oauth:configure
 ```
 
-命令会生成被 Git 忽略的 `electron/oauth-config.generated.cjs`。正式构建内置该配置后，用户只需点击“登录”，并在系统浏览器中完成 Google OAuth 授权。为兼容当前开发数据，旧版保存在本机设置中的加密 OAuth 配置仍可继续使用。
+命令会生成 `electron/oauth-config.generated.cjs`。正式构建内置该配置后，用户只需点击“登录”，并在系统浏览器中完成 Google OAuth 授权。为兼容当前开发数据，旧版保存在本机设置中的加密 OAuth 配置仍可继续使用。
 
-登录后会在启动时自动同步；本地保存后约 2 秒自动同步；应用保持打开时每 5 分钟检查一次其他设备的更新。“立即同步”按钮继续作为手动兜底。
+登录后可点击“立即同步”手动同步；应用保持打开时每 5 分钟会在后台检查一次其他设备的更新。新建、保存和删除不会立即触发 Google Drive 同步，以免编辑时被后台同步打断。
 
 同步数据保存在 Google Drive 的 `appDataFolder` 私有空间，不会出现在普通 Drive 文件列表里。旧版 `study-cards-data.json` 会作为只读迁移来源保留；新版为每个设备创建独立的 `study-cards-device-*.json` 快照。不同设备不会覆盖同一个远端文件，后续同步会合并所有设备快照，并通过删除墓碑和冲突副本避免静默丢失内容。
 
-refresh token 使用 Electron `safeStorage` 加密保存。系统凭据加密不可用时，应用会拒绝明文保存并显示中文处理提示。
+OAuth client ID 和 client secret 会被内置进桌面客户端，不能当作真正的秘密保护；asar、压缩或混淆都只能增加提取门槛，不能从根本上阻止提取。当前安全边界依赖最小权限 `drive.appdata`、Google OAuth 用户授权和测试用户/发布限制。真正需要本机保护的是用户的 refresh token，这部分使用 Electron `safeStorage` 加密保存。系统凭据加密不可用时，应用会拒绝明文保存并显示中文处理提示。
 
 ## 数据位置与可靠性
 
@@ -83,7 +84,7 @@ cards.corrupt-2026-06-19T12-00-00-000Z.json
 
 ## 本地私有文件
 
-`local-notes/` 是本地计划和临时说明目录，已在 `.gitignore` 中忽略，不会上传到 GitHub。`electron/oauth-config.generated.cjs`、`node_modules/`、`dist/`、`release/`、`.env*` 也不会进入版本管理。
+`local-notes/` 是本地计划和临时说明目录，已在 `.gitignore` 中忽略，不会上传到 GitHub。`node_modules/`、`dist/`、`release/`、`.env*` 也不会进入版本管理。`electron/oauth-config.generated.cjs` 当前用于内置 OAuth 配置；如果以后准备公开仓库，公开前应移出版本管理并轮换 Google OAuth 客户端配置。
 
 ## 当前状态
 

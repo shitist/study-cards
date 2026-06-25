@@ -289,6 +289,9 @@ async function clearSyncTransaction() {
 }
 
 function createWindow() {
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL;
+  const trustedDevServerUrl = !app.isPackaged && isTrustedDevServerUrl(devServerUrl) ? devServerUrl : "";
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -296,6 +299,7 @@ function createWindow() {
     minHeight: 680,
     backgroundColor: "#f7f4ee",
     title: "学习卡片",
+    icon: path.join(__dirname, "..", "build", "icon.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -304,10 +308,41 @@ function createWindow() {
     }
   });
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (!isAllowedAppNavigation(url, trustedDevServerUrl)) {
+      event.preventDefault();
+    }
+  });
+
+  if (trustedDevServerUrl) {
+    mainWindow.loadURL(trustedDevServerUrl);
   } else {
     mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+  }
+}
+
+function isTrustedDevServerUrl(value) {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "http:" &&
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedAppNavigation(value, trustedDevServerUrl) {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "file:") return true;
+    if (!trustedDevServerUrl) return false;
+    return url.origin === new URL(trustedDevServerUrl).origin;
+  } catch {
+    return false;
   }
 }
 
