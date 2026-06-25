@@ -1,6 +1,7 @@
 local-notes/
 node_modules/
 dist/
+electron/oauth-config.generated.cjs
 *.log
 .env
 .env.local

@@ -58,13 +58,13 @@ $env:STUDY_CARDS_GOOGLE_CLIENT_SECRET="你的客户端密钥"
 npm run oauth:configure
 ```
 
-命令会生成 `electron/oauth-config.generated.cjs`。正式构建内置该配置后，用户只需点击“登录”，并在系统浏览器中完成 Google OAuth 授权。为兼容当前开发数据，旧版保存在本机设置中的加密 OAuth 配置仍可继续使用。
+命令会生成 `electron/oauth-config.generated.cjs`，该文件包含真实 OAuth client ID / client secret，已被 `.gitignore` 忽略，不应提交到公开仓库。仓库中只保留 `electron/oauth-config.example.cjs` 作为格式示例。正式构建内置本地生成的配置后，用户只需点击“登录”，并在系统浏览器中完成 Google OAuth 授权。为兼容当前开发数据，旧版保存在本机设置中的加密 OAuth 配置仍可继续使用。
 
 登录后可点击“立即同步”手动同步；应用保持打开时每 5 分钟会在后台检查一次其他设备的更新。新建、保存和删除不会立即触发 Google Drive 同步，以免编辑时被后台同步打断。
 
 同步数据保存在 Google Drive 的 `appDataFolder` 私有空间，不会出现在普通 Drive 文件列表里。旧版 `study-cards-data.json` 会作为只读迁移来源保留；新版为每个设备创建独立的 `study-cards-device-*.json` 快照。不同设备不会覆盖同一个远端文件，后续同步会合并所有设备快照，并通过删除墓碑和冲突副本避免静默丢失内容。
 
-OAuth client ID 和 client secret 会被内置进桌面客户端，不能当作真正的秘密保护；asar、压缩或混淆都只能增加提取门槛，不能从根本上阻止提取。当前安全边界依赖最小权限 `drive.appdata`、Google OAuth 用户授权和测试用户/发布限制。真正需要本机保护的是用户的 refresh token，这部分使用 Electron `safeStorage` 加密保存。系统凭据加密不可用时，应用会拒绝明文保存并显示中文处理提示。
+OAuth client ID 和 client secret 在打包后会被内置进桌面客户端，不能当作真正的秘密保护；asar、压缩或混淆都只能增加提取门槛，不能从根本上阻止提取。当前安全边界依赖最小权限 `drive.appdata`、Google OAuth 用户授权和测试用户/发布限制。真正需要本机保护的是用户的 refresh token，这部分使用 Electron `safeStorage` 加密保存。系统凭据加密不可用时，应用会拒绝明文保存并显示中文处理提示。
 
 ## 数据位置与可靠性
 
@@ -84,7 +84,7 @@ cards.corrupt-2026-06-19T12-00-00-000Z.json
 
 ## 本地私有文件
 
-`local-notes/` 是本地计划和临时说明目录，已在 `.gitignore` 中忽略，不会上传到 GitHub。`node_modules/`、`dist/`、`release/`、`.env*` 也不会进入版本管理。`electron/oauth-config.generated.cjs` 当前用于内置 OAuth 配置；如果以后准备公开仓库，公开前应移出版本管理并轮换 Google OAuth 客户端配置。
+`local-notes/` 是本地计划和临时说明目录，已在 `.gitignore` 中忽略，不会上传到 GitHub。`node_modules/`、`dist/`、`release/`、`.env*` 以及 `electron/oauth-config.generated.cjs` 也不会进入版本管理。公开源码仓库不包含真实 OAuth client ID / client secret；如果你 fork 后需要 Google Drive 同步，请创建自己的 Google OAuth Desktop client，并运行 `npm run oauth:configure` 生成本地配置。
 
 ## 当前状态
 
