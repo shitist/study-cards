@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, safeStorage, shell } = require("electron");
+const { autoUpdater } = require("electron-updater");
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -22,10 +23,11 @@ const { createOperationCoordinator } = require("./operation-coordinator.cjs");
 const { normalizeSyncState } = require("./sync-state.cjs");
 const { commitSyncPlan, recoverPendingSync } = require("./sync-transaction.cjs");
 const { createSettingsPayload, getBundledOAuthConfig } = require("./oauth-config.cjs");
+const { createUpdateService } = require("./update-service.cjs");
 
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 const TOKEN_SKEW_MS = 60_000;
-const OAUTH_TIMEOUT_MS = 180_000;
+const OAUTH_TIMEOUT_MS = 90_000;
 const DRIVE_RETRY_ATTEMPTS = 3;
 const DRIVE_RETRY_BASE_MS = 300;
 
@@ -36,7 +38,9 @@ if (!hasSingleInstanceLock) app.quit();
 
 let mainWindow = null;
 let databaseWriteBlockReason = "";
+let activeOAuthListener = null;
 const operationCoordinator = createOperationCoordinator();
+const updateService = createUpdateService({ app, autoUpdater, getWindow: () => mainWindow });
 
 
 function getPaths() {
@@ -313,6 +317,10 @@ function createWindow() {
     if (!isAllowedAppNavigation(url, trustedDevServerUrl)) {
       event.preventDefault();
     }
+  });
+
+  mainWindow.webContents.once("did-finish-load", () => {
+    updateService.scheduleStartupCheck();
   });
 
   if (trustedDevServerUrl) {
@@ -688,22 +696,28 @@ async function getDriveStatus() {
 ipcMain.handle("cards:load", async () => loadDatabase());
 ipcMain.handle("cards:save", async (_event, database) =>
   operationCoordinator.runSave(() => saveDatabase(database, { validate: true }))
-);ipcMain.handle("cards:getStorageInfo", async () => ({ dataPath: getPaths().data, userDataPath: getPaths().userData }));
+);
+ipcMain.handle("cards:getStorageInfo", async () => ({ dataPath: getPaths().data, userDataPath: getPaths().userData }));
 ipcMain.handle("settings:load", async () => readSettings());
 ipcMain.handle("settings:save", async (_event, settings) => saveSettings(settings));
 ipcMain.handle("drive:status", async () => getDriveStatus());
 ipcMain.handle("drive:signIn", async () => {
   const oauthConfig = await getOAuthConfig();
   if (!oauthConfig.configured) {
-    throw new Error("当前版本尚未配置 Google OAuth，请使用带有内置 OAuth 配置的正式构建。");
+    throw new Error("\u5f53\u524d\u7248\u672c\u672a\u914d\u7f6e Google OAuth\uff0c\u8bf7\u4f7f\u7528\u5e26\u6709\u5185\u7f6e OAuth \u914d\u7f6e\u7684\u6b63\u5f0f\u6784\u5efa\u3002");
+  }
+
+  if (activeOAuthListener) {
+    activeOAuthListener.cancel("Google Drive \u767b\u5f55\u5df2\u53d6\u6d88\u3002");
   }
 
   const { verifier, challenge } = generatePkce();
   const state = crypto.randomUUID();
-  const { redirectUri, codePromise } = await createOAuthCodeListener(state, { timeoutMs: OAUTH_TIMEOUT_MS });
+  const listener = await createOAuthCodeListener(state, { timeoutMs: OAUTH_TIMEOUT_MS });
+  activeOAuthListener = listener;
   const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   authUrl.searchParams.set("client_id", oauthConfig.clientId);
-  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("redirect_uri", listener.redirectUri);
   authUrl.searchParams.set("response_type", "code");
   authUrl.searchParams.set("scope", DRIVE_SCOPE);
   authUrl.searchParams.set("access_type", "offline");
@@ -712,17 +726,27 @@ ipcMain.handle("drive:signIn", async () => {
   authUrl.searchParams.set("code_challenge", challenge);
   authUrl.searchParams.set("code_challenge_method", "S256");
 
-  await shell.openExternal(authUrl.toString());
-  const code = await codePromise;
-  const tokens = await exchangeCodeForTokens({
-    clientId: oauthConfig.clientId,
-    clientSecret: oauthConfig.clientSecret,
-    code,
-    redirectUri,
-    verifier
-  });
-  await saveTokens(tokens);
-  return getDriveStatus();
+  try {
+    await shell.openExternal(authUrl.toString());
+    const code = await listener.codePromise;
+    const tokens = await exchangeCodeForTokens({
+      clientId: oauthConfig.clientId,
+      clientSecret: oauthConfig.clientSecret,
+      code,
+      redirectUri: listener.redirectUri,
+      verifier
+    });
+    await saveTokens(tokens);
+    return getDriveStatus();
+  } finally {
+    if (activeOAuthListener === listener) activeOAuthListener = null;
+  }
+});
+ipcMain.handle("drive:cancelSignIn", async () => {
+  if (!activeOAuthListener) return { cancelled: false };
+  activeOAuthListener.cancel("Google Drive \u767b\u5f55\u5df2\u53d6\u6d88\u3002");
+  activeOAuthListener = null;
+  return { cancelled: true };
 });
 ipcMain.handle("drive:signOut", async () => {
   await clearTokens();
@@ -731,6 +755,10 @@ ipcMain.handle("drive:signOut", async () => {
 ipcMain.handle("drive:sync", async () =>
   operationCoordinator.runSync(() => performDriveSync())
 );
+ipcMain.handle("updates:getStatus", async () => updateService.getStatus());
+ipcMain.handle("updates:check", async () => updateService.checkForUpdates());
+ipcMain.handle("updates:download", async () => updateService.downloadUpdate());
+ipcMain.handle("updates:install", async () => updateService.quitAndInstall());
 
 if (hasSingleInstanceLock) {
   app.on("second-instance", () => {
@@ -743,6 +771,10 @@ if (hasSingleInstanceLock) {
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+
+  app.on("before-quit", () => {
+    if (activeOAuthListener) activeOAuthListener.cancel("Google Drive \u767b\u5f55\u5df2\u53d6\u6d88\u3002");
   });
 
   app.on("window-all-closed", () => {

@@ -9,7 +9,7 @@ function getLoopbackRedirectUri(server) {
 }
 
 async function createOAuthCodeListener(expectedState, options = {}) {
-  const timeoutMs = options.timeoutMs ?? 180_000;
+  const timeoutMs = options.timeoutMs ?? 90_000;
   let settled = false;
   let timeout = null;
   let resolveCode;
@@ -77,6 +77,10 @@ async function createOAuthCodeListener(expectedState, options = {}) {
     closeServer();
   }
 
+  function cancel(reason = "Google Drive \u767b\u5f55\u5df2\u53d6\u6d88\u3002") {
+    settle(new Error(reason));
+  }
+
   server.on("error", (error) => settle(error));
 
   await new Promise((resolve, reject) => {
@@ -90,11 +94,11 @@ async function createOAuthCodeListener(expectedState, options = {}) {
 
   const redirectUri = getLoopbackRedirectUri(server);
   timeout = setTimeout(() => {
-    settle(new Error("Google Drive 登录等待超时，请重新发起登录。"));
+    settle(new Error("Google Drive \u767b\u5f55\u7b49\u5f85\u8d85\u65f6\uff0c\u8bf7\u91cd\u65b0\u53d1\u8d77\u767b\u5f55\u3002"));
   }, timeoutMs);
   if (typeof timeout.unref === "function") timeout.unref();
 
-  return { redirectUri, codePromise };
+  return { redirectUri, codePromise, cancel };
 }
 
 module.exports = { createOAuthCodeListener };

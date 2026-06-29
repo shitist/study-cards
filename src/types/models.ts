@@ -50,6 +50,14 @@ export type DriveSyncResult = {
   message: string;
 };
 
+export type UpdateStatus = {
+  status: "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error" | "unavailable";
+  currentVersion: string;
+  version: string | null;
+  percent: number | null;
+  error: string | null;
+};
+
 export type StorageInfo = {
   dataPath: string;
   userDataPath: string;
@@ -63,6 +71,12 @@ export type StudyCardsBridge = {
   saveSettings: (settings: Partial<AppSettings>) => Promise<AppSettings>;
   getDriveStatus: () => Promise<DriveStatus>;
   signInDrive: () => Promise<DriveStatus>;
+  cancelSignInDrive: () => Promise<{ cancelled: boolean }>;
   signOutDrive: () => Promise<DriveStatus>;
   syncDrive: () => Promise<DriveSyncResult>;
+  getUpdateStatus: () => Promise<UpdateStatus>;
+  checkForUpdates: () => Promise<UpdateStatus>;
+  downloadUpdate: () => Promise<UpdateStatus>;
+  installUpdate: () => Promise<UpdateStatus>;
+  onUpdateStatus: (callback: (status: UpdateStatus) => void) => () => void;
 };

@@ -7,6 +7,7 @@ import {
   ClipboardCopy,
   Cloud,
   CloudOff,
+  Download,
   Filter,
   GripVertical,
   Loader2,
@@ -43,18 +44,24 @@ import {
   parseCategory
 } from "./lib/cards";
 import {
+  cancelSignInDrive,
+  checkForUpdates,
+  downloadUpdate,
   getDriveStatus,
   getStorageInfo,
+  getUpdateStatus,
   hasNativeBridge,
+  installUpdate,
   loadCards,
   loadSettings,
+  onUpdateStatus,
   saveCards,
   saveSettings,
   signInDrive,
   signOutDrive,
   syncDrive
 } from "./lib/storage";
-import type { AppSettings, CardDatabase, DriveStatus, StorageInfo, StudyCard, StudyCardFields, ThemePreference } from "./types/models";
+import type { AppSettings, CardDatabase, DriveStatus, StorageInfo, StudyCard, StudyCardFields, ThemePreference, UpdateStatus } from "./types/models";
 
 type FieldDefinition = {
   key: keyof StudyCardFields;
@@ -142,7 +149,21 @@ const TEXT = {
   driveSignOutToast: "\u5df2\u65ad\u5f00 Google Drive",
   dataLoadBlocked: "\u672c\u5730\u6570\u636e\u8bfb\u53d6\u5931\u8d25\uff0c\u5df2\u6682\u505c\u5199\u5165\uff0c\u907f\u514d\u8986\u76d6\u539f\u6587\u4ef6\u3002\u8bf7\u5148\u5904\u7406\u9519\u8bef\u6216\u5907\u4efd\u6587\u4ef6\u540e\u91cd\u542f\u5e94\u7528\u3002",
   syncInProgress: "\u6b63\u5728\u540c\u6b65 Google Drive\uff0c\u8bf7\u7b49\u5f85\u540c\u6b65\u5b8c\u6210\u540e\u518d\u4fee\u6539\u5361\u7247\u3002",
-  saveBeforeSync: "\u5f53\u524d\u5361\u7247\u8fd8\u6709\u672a\u4fdd\u5b58\u7684\u4fee\u6539\uff0c\u8bf7\u5148\u4fdd\u5b58\u518d\u540c\u6b65\u3002"
+  saveBeforeSync: "\u5f53\u524d\u5361\u7247\u8fd8\u6709\u672a\u4fdd\u5b58\u7684\u4fee\u6539\uff0c\u8bf7\u5148\u4fdd\u5b58\u518d\u540c\u6b65\u3002",
+  cancelSignIn: "\u53d6\u6d88\u767b\u5f55",
+  signInCancelled: "Google Drive \u767b\u5f55\u5df2\u53d6\u6d88",
+  updates: "\u66f4\u65b0",
+  currentVersion: "\u5f53\u524d\u7248\u672c",
+  checkUpdates: "\u68c0\u67e5\u66f4\u65b0",
+  checkingUpdates: "\u6b63\u5728\u68c0\u67e5",
+  downloadUpdate: "\u4e0b\u8f7d\u66f4\u65b0",
+  downloadingUpdate: "\u6b63\u5728\u4e0b\u8f7d",
+  installUpdate: "\u91cd\u542f\u5e76\u5b89\u88c5",
+  noUpdateAvailable: "\u5f53\u524d\u5df2\u662f\u6700\u65b0\u7248\u672c",
+  updateUnavailable: "\u5f00\u53d1\u6a21\u5f0f\u4e0d\u652f\u6301\u81ea\u52a8\u66f4\u65b0\uff0c\u8bf7\u4f7f\u7528\u5b89\u88c5\u7248\u6d4b\u8bd5\u3002",
+  updateDownloadedToast: "\u66f4\u65b0\u5df2\u4e0b\u8f7d",
+  updateAvailablePrompt: (version: string) => "\u53d1\u73b0\u65b0\u7248\u672c " + version + "\uff0c\u662f\u5426\u4e0b\u8f7d\u66f4\u65b0\uff1f",
+  updateDownloadedPrompt: (version: string) => "\u66f4\u65b0 " + version + " \u5df2\u4e0b\u8f7d\uff0c\u662f\u5426\u7acb\u5373\u91cd\u542f\u5e76\u5b89\u88c5\uff1f"
 };
 
 const fieldDefinitions: FieldDefinition[] = [
@@ -169,6 +190,14 @@ const defaultDriveStatus: DriveStatus = {
   configured: false,
   signedIn: false,
   lastSyncedAt: null
+};
+
+const defaultUpdateStatus: UpdateStatus = {
+  status: "idle",
+  currentVersion: "-",
+  version: null,
+  percent: null,
+  error: null
 };
 
 function cloneCard(card: StudyCard): StudyCard {
@@ -199,8 +228,11 @@ export default function App() {
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
   const [autoSyncBusy, setAutoSyncBusy] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>(defaultUpdateStatus);
+  const [updateBusy, setUpdateBusy] = useState(false);
   const [error, setError] = useState("");
   const [dataLoadBlocked, setDataLoadBlocked] = useState(false);
   const { message: toast, showToast } = useToast();
@@ -208,6 +240,9 @@ export default function App() {
   const autoSyncRunnerRef = useRef<() => Promise<void>>(async () => undefined);
   const backgroundSyncPromiseRef = useRef<Promise<void> | null>(null);
   const preserveDraftOnSyncRef = useRef(false);
+  const signInCancelRequestedRef = useRef(false);
+  const promptedUpdateVersionRef = useRef<string | null>(null);
+  const promptedInstallVersionRef = useRef<string | null>(null);
   const databaseRef = useRef(database);
   const draftRef = useRef(draft);
   databaseRef.current = database;
@@ -233,15 +268,17 @@ export default function App() {
       }
 
       try {
-        const [loadedSettings, loadedDriveStatus, info] = await Promise.all([
+        const [loadedSettings, loadedDriveStatus, info, loadedUpdateStatus] = await Promise.all([
           loadSettings(),
           getDriveStatus(),
-          getStorageInfo()
+          getStorageInfo(),
+          getUpdateStatus()
         ]);
         if (!mounted) return;
         setSettings(loadedSettings);
         setDriveStatus(loadedDriveStatus);
         setStorageInfo(info);
+        setUpdateStatus(loadedUpdateStatus);
       } catch (nextError) {
         if (!mounted) return;
         setError(nextError instanceof Error ? nextError.message : String(nextError));
@@ -253,6 +290,27 @@ export default function App() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!hasNativeBridge) return undefined;
+    return onUpdateStatus((status) => setUpdateStatus(status));
+  }, []);
+
+  useEffect(() => {
+    if (updateStatus.status === "available" && updateStatus.version && promptedUpdateVersionRef.current !== updateStatus.version) {
+      promptedUpdateVersionRef.current = updateStatus.version;
+      if (window.confirm(TEXT.updateAvailablePrompt(updateStatus.version))) {
+        void handleDownloadUpdate();
+      }
+    }
+
+    if (updateStatus.status === "downloaded" && updateStatus.version && promptedInstallVersionRef.current !== updateStatus.version) {
+      promptedInstallVersionRef.current = updateStatus.version;
+      if (window.confirm(TEXT.updateDownloadedPrompt(updateStatus.version))) {
+        void handleInstallUpdate();
+      }
+    }
+  }, [updateStatus.status, updateStatus.version]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -321,6 +379,22 @@ export default function App() {
   );
 
   const hasUnsavedChanges = Boolean(draft && (!selectedCard || JSON.stringify(draft) !== JSON.stringify(selectedCard)));
+
+  const updateStatusText = useMemo(() => {
+    if (updateStatus.status === "checking") return TEXT.checkingUpdates;
+    if (updateStatus.status === "available") return updateStatus.version ? TEXT.updates + " " + updateStatus.version : TEXT.downloadUpdate;
+    if (updateStatus.status === "downloading") {
+      const percent = typeof updateStatus.percent === "number" ? " " + Math.round(updateStatus.percent) + "%" : "";
+      return TEXT.downloadingUpdate + percent;
+    }
+    if (updateStatus.status === "downloaded") return updateStatus.version ? TEXT.updateDownloadedToast + " " + updateStatus.version : TEXT.updateDownloadedToast;
+    if (updateStatus.status === "not-available") return TEXT.noUpdateAvailable;
+    if (updateStatus.status === "unavailable") return updateStatus.error || TEXT.updateUnavailable;
+    if (updateStatus.status === "error") return updateStatus.error || "Update error";
+    return TEXT.noUpdateAvailable;
+  }, [updateStatus]);
+
+  const updateIsWorking = updateBusy || updateStatus.status === "checking" || updateStatus.status === "downloading";
 
   const draftCategory = useMemo(() => {
     if (!draft) return { major: AI_LLM_CATEGORY, subcategory: AI_LLM_SUBCATEGORIES[0] };
@@ -453,6 +527,7 @@ export default function App() {
 
   async function handleCreateCard() {
     if (!guardCardMutation()) return;
+    if (!(await saveBeforeLeavingDraft())) return;
     await waitForBackgroundSync();
     const currentDatabase = databaseRef.current;
     const card = createCard(activeCategory !== ALL_CATEGORIES ? activeCategory : DEFAULT_CATEGORY);
@@ -461,37 +536,60 @@ export default function App() {
     showToast(TEXT.createdToast);
   }
 
-  async function handleSaveDraft() {
+  async function saveCurrentDraft(showNotification = true) {
     const requestedCardId = draftRef.current?.id;
-    if (!requestedCardId || !guardCardMutation()) return;
-    await waitForBackgroundSync();
-    const currentDraft = draftRef.current;
-    if (!currentDraft || currentDraft.id !== requestedCardId) return;
+    if (!requestedCardId) return true;
+    if (!hasUnsavedDraftNow()) return true;
+    if (!guardCardMutation()) return false;
 
-    const timestamp = nowIso();
-    const normalized = normalizeCard({
-      ...currentDraft,
-      updatedAt: timestamp,
-      updateHistory: [...currentDraft.updateHistory, timestamp]
-    });
-    const currentDatabase = databaseRef.current;
-    const cardExists = currentDatabase.cards.some((card) => card.id === normalized.id);
-    const nextCards = (cardExists
-      ? currentDatabase.cards.map((card) => (card.id === normalized.id ? normalized : card))
-      : [normalized, ...currentDatabase.cards]
-    ).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    const nextDeletedCards = { ...currentDatabase.deletedCards };
-    delete nextDeletedCards[normalized.id];
-    const saved = await persist({
-      ...currentDatabase,
-      cards: nextCards,
-      deletedCards: nextDeletedCards
-    });
-    setSelectedId(normalized.id);
-    const savedDraft = cloneCard(saved.cards.find((card) => card.id === normalized.id) ?? normalized);
-    draftRef.current = savedDraft;
-    setDraft(savedDraft);
-    showToast(TEXT.savedToast);
+    try {
+      await waitForBackgroundSync();
+      const currentDraft = draftRef.current;
+      if (!currentDraft || currentDraft.id !== requestedCardId) return false;
+
+      const timestamp = nowIso();
+      const normalized = normalizeCard({
+        ...currentDraft,
+        updatedAt: timestamp,
+        updateHistory: [...currentDraft.updateHistory, timestamp]
+      });
+      const currentDatabase = databaseRef.current;
+      const cardExists = currentDatabase.cards.some((card) => card.id === normalized.id);
+      const nextCards = (cardExists
+        ? currentDatabase.cards.map((card) => (card.id === normalized.id ? normalized : card))
+        : [normalized, ...currentDatabase.cards]
+      ).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      const nextDeletedCards = { ...currentDatabase.deletedCards };
+      delete nextDeletedCards[normalized.id];
+      const saved = await persist({
+        ...currentDatabase,
+        cards: nextCards,
+        deletedCards: nextDeletedCards
+      });
+      const savedDraft = cloneCard(saved.cards.find((card) => card.id === normalized.id) ?? normalized);
+      draftRef.current = savedDraft;
+      setDraft(savedDraft);
+      if (showNotification) showToast(TEXT.savedToast);
+      return true;
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+      return false;
+    }
+  }
+
+  async function saveBeforeLeavingDraft() {
+    if (!hasUnsavedDraftNow()) return true;
+    return saveCurrentDraft(false);
+  }
+
+  async function handleSaveDraft() {
+    await saveCurrentDraft(true);
+  }
+
+  async function handleSelectCard(cardId: string) {
+    if (cardId === selectedId) return;
+    if (!(await saveBeforeLeavingDraft())) return;
+    setSelectedId(cardId);
   }
 
   async function handleDeleteCard(cardId: string) {
@@ -579,15 +677,33 @@ export default function App() {
 
   async function handleDriveSignIn() {
     try {
-      setBusy(true);
+      signInCancelRequestedRef.current = false;
+      setAuthBusy(true);
       setError("");
       const status = await signInDrive();
       setDriveStatus(status);
       showToast(TEXT.driveSignInToast);
     } catch (nextError) {
+      if (signInCancelRequestedRef.current) {
+        showToast(TEXT.signInCancelled);
+      } else {
+        setError(nextError instanceof Error ? nextError.message : String(nextError));
+      }
+    } finally {
+      signInCancelRequestedRef.current = false;
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleCancelDriveSignIn() {
+    signInCancelRequestedRef.current = true;
+    try {
+      await cancelSignInDrive();
+      showToast(TEXT.signInCancelled);
+    } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
     } finally {
-      setBusy(false);
+      setAuthBusy(false);
     }
   }
 
@@ -612,6 +728,44 @@ export default function App() {
       return;
     }
     await runDriveSync(true);
+  }
+
+  async function handleCheckUpdates() {
+    setUpdateBusy(true);
+    setError("");
+    try {
+      const status = await checkForUpdates();
+      setUpdateStatus(status);
+      if (status.status === "not-available") showToast(TEXT.noUpdateAvailable);
+      if (status.status === "unavailable") showToast(status.error || TEXT.updateUnavailable);
+      if (status.status === "error") setError(status.error || "Update error");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function handleDownloadUpdate() {
+    setUpdateBusy(true);
+    setError("");
+    try {
+      const status = await downloadUpdate();
+      setUpdateStatus(status);
+      if (status.status === "error") setError(status.error || "Update error");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function handleInstallUpdate() {
+    try {
+      await installUpdate();
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : String(nextError));
+    }
   }
   return (
     <div className="app-shell">
@@ -742,7 +896,7 @@ export default function App() {
                 className={card.id === selectedId ? "study-card active" : "study-card"}
                 draggable
                 onDragStart={(event) => handleDragStart(event, card)}
-                onClick={() => setSelectedId(card.id)}
+                onClick={() => void handleSelectCard(card.id)}
               >
                 <div className="drag-handle" aria-hidden="true">
                   <GripVertical size={17} />
@@ -935,6 +1089,32 @@ export default function App() {
             </div>
           </div>
 
+          <div className="update-section">
+            <div className="update-header">
+              <span>{TEXT.updates}</span>
+              <small>{TEXT.currentVersion} {updateStatus.currentVersion}</small>
+            </div>
+            <p className="update-status">{updateStatusText}</p>
+            <div className="update-actions">
+              <button className="secondary-button compact" onClick={handleCheckUpdates} disabled={!hasNativeBridge || updateIsWorking}>
+                {updateIsWorking ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+                {updateStatus.status === "downloading" ? TEXT.downloadingUpdate : updateIsWorking ? TEXT.checkingUpdates : TEXT.checkUpdates}
+              </button>
+              {updateStatus.status === "available" ? (
+                <button className="secondary-button compact" onClick={handleDownloadUpdate} disabled={updateIsWorking}>
+                  <Download size={16} />
+                  {TEXT.downloadUpdate}
+                </button>
+              ) : null}
+              {updateStatus.status === "downloaded" ? (
+                <button className="primary-button compact" onClick={handleInstallUpdate}>
+                  <RefreshCw size={16} />
+                  {TEXT.installUpdate}
+                </button>
+              ) : null}
+            </div>
+          </div>
+
           {!driveStatus.configured ? (
             <p className="sync-config-warning">{TEXT.oauthNotConfigured}</p>
           ) : null}
@@ -942,19 +1122,19 @@ export default function App() {
           <div className="settings-actions">
             <button
               className="primary-button compact"
-              onClick={handleDriveSignIn}
-              disabled={busy || syncBusy || autoSyncBusy || !hasNativeBridge || !driveStatus.configured}
+              onClick={authBusy ? handleCancelDriveSignIn : handleDriveSignIn}
+              disabled={!authBusy && (busy || syncBusy || autoSyncBusy || !hasNativeBridge || !driveStatus.configured)}
             >
-              {busy ? <Loader2 className="spin" size={17} /> : <Cloud size={17} />}
-              {TEXT.signIn}
+              {authBusy ? <Loader2 className="spin" size={17} /> : <Cloud size={17} />}
+              {authBusy ? TEXT.cancelSignIn : TEXT.signIn}
             </button>
           </div>
-          <button className="wide-action" onClick={handleDriveSync} disabled={dataLoadBlocked || busy || syncBusy || autoSyncBusy || !driveStatus.signedIn}>
+          <button className="wide-action" onClick={handleDriveSync} disabled={dataLoadBlocked || busy || authBusy || syncBusy || autoSyncBusy || !driveStatus.signedIn}>
             {syncBusy ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
             {TEXT.syncNow}
           </button>
 
-          <button className="text-button" onClick={handleDriveSignOut} disabled={busy || syncBusy || autoSyncBusy || !driveStatus.signedIn}>
+          <button className="text-button" onClick={handleDriveSignOut} disabled={busy || authBusy || syncBusy || autoSyncBusy || !driveStatus.signedIn}>
             {TEXT.disconnect}
           </button>
 

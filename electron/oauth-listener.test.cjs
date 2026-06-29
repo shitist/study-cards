@@ -69,3 +69,14 @@ test("OAuth callback ignores an invalid state and keeps waiting", async () => {
   assert.equal(code, "authorization-code");
   assert.equal(validResponse.statusCode, 200);
 });
+
+test("OAuth listener can be cancelled explicitly", async () => {
+  const { codePromise, cancel } = await createOAuthCodeListener("expected-state", { timeoutMs: 1_000 });
+  cancel("cancelled by test");
+  await assert.rejects(codePromise, /cancelled by test/);
+});
+
+test("OAuth listener rejects when the login callback never arrives", async () => {
+  const { codePromise } = await createOAuthCodeListener("expected-state", { timeoutMs: 20 });
+  await assert.rejects(codePromise, /Google Drive/);
+});

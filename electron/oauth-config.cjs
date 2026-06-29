@@ -11,6 +11,7 @@ function normalizeOAuthConfig(value, source = "none") {
 
 function loadGeneratedConfig() {
   try {
+    // @ts-ignore Optional private/self-use generated config may be absent in the public repo.
     return require("./oauth-config.generated.cjs");
   } catch (error) {
     if (error && error.code === "MODULE_NOT_FOUND" && String(error.message).includes("oauth-config.generated.cjs")) {

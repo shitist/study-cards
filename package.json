@@ -1,6 +1,6 @@
 {
   "name": "study-cards",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "A compact desktop study card app for structured learning notes.",
   "main": "electron/main.cjs",
@@ -13,6 +13,9 @@
     "start": "npm run build && electron .",
     "test": "node --test electron/*.test.cjs",
     "typecheck:electron": "tsc --allowJs --checkJs --noEmit --skipLibCheck --target es2022 --module node16 --moduleResolution node16 electron/main.cjs"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
@@ -44,6 +47,14 @@
       "electron/**/*",
       "!electron/*.test.cjs",
       "package.json"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "shitist",
+        "repo": "study-cards",
+        "releaseType": "release"
+      }
     ],
     "win": {
       "icon": "build/icon.ico",

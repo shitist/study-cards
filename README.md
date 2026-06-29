@@ -1,27 +1,17 @@
 # 学习卡片
 
-一个面向结构化学习笔记的 Windows 桌面应用。它把一个概念拆成固定的学习卡片字段，方便记录"是什么、为什么遇到、解决什么、不解决什么、如何验证"，并支持本地保存、Google Drive 私有同步、主题切换和拖拽导出到文本文档类应用。
-
-目前功能比较简陋，只是一个适合本人工作流的小工具。
+一个面向结构化学习笔记的桌面应用。它把每个概念拆成固定字段，适合记录 AI/LLM、历史、地理等主题下的学习卡片，并支持本地保存、Google Drive 多设备同步、主题切换、搜索筛选和 Markdown 拖拽/复制。
 
 ## 主要功能
 
-- 结构化卡片：概念、定义、遇到原因、解决范围、边界、验证方法、备注。
-- 分类目录：内置 `AI/LLM`、`历史`、`地理`，其中 `AI/LLM` 支持细分子类和自定义子类。
-- 标题搜索：搜索只匹配卡片标题，避免正文内容误命中过多结果。
-- 本地持久化：卡片保存为用户数据目录里的 JSON 文件。
-- 数据保护：写入采用临时文件加 rename；本地数据损坏时自动备份并暂停写入，避免空数据覆盖原文件。
-- Google Drive 多设备同步：使用 `appDataFolder` 私有空间、PKCE OAuth、系统加密 token 存储。
-- 桌面交互：卡片可复制 Markdown，也可拖拽到 Word、Notepad++ 等文本文档类应用。
-- 主题：浅色、深色、跟随系统。
-
-## 技术栈
-
-- Electron 42
-- React 19
-- TypeScript
-- Vite 7
-- Node.js 内置 `node:test`
+- 结构化卡片：概念、定义、遇到原因、解决什么、不解决什么、验证方法、备注。
+- 分类目录：内置 AI/LLM、历史、地理三个大类，AI/LLM 支持子分类和自定义子分类。
+- 搜索与筛选：搜索仅匹配标题，分类支持左侧分级目录筛选。
+- 本地保存：数据保存到用户数据目录中的 JSON 文件，写入采用临时文件加 rename 的方式降低损坏风险。
+- Google Drive 同步：使用 appDataFolder 私有空间、PKCE OAuth、多设备快照合并和删除墓碑。
+- 编辑保护：切换词条或新建词条前会先保存当前草稿，避免未保存内容丢失。
+- 桌面交互：支持复制 Markdown，也支持将卡片拖拽到兼容的文本类应用。
+- 自动更新：安装版可检查 GitHub Release，发现新版本后询问是否下载和安装。
 
 ## 本地开发
 
@@ -30,7 +20,7 @@ npm install
 npm run dev
 ```
 
-开发脚本会启动 Vite 和 Electron。默认端口是 `5173`，并使用严格端口模式，避免 Vite 自动切换端口后 Electron 仍连接旧地址。需要换端口时可以设置：
+开发脚本会同时启动 Vite 和 Electron。默认端口为 5173；如需指定端口：
 
 ```powershell
 $env:VITE_PORT="5174"
@@ -46,20 +36,26 @@ npm run build
 npm run package:win
 ```
 
-`npm test` 覆盖核心数据逻辑，包括 schema 校验、稳定序列化、数据库归一化、OAuth 回调、构建配置和多设备快照冲突合并。
+- `npm test` 运行核心数据、同步、OAuth 回调和更新服务测试。
+- `npm run typecheck` 检查前端 TypeScript 和 Electron 主进程 checkJs。
+- `npm run package:win` 使用 electron-builder 生成 Windows x64 安装包到 `release/`。
 
-生产构建会输出到 `dist/`。`npm run package:win` 会使用 electron-builder 生成 Windows x64 安装包，产物输出到 `release/`。
+## Google Drive OAuth 配置
 
-## Google Drive 同步设置
-
-OAuth 客户端配置不在普通用户界面中显示。开发或生成正式构建前，通过环境变量生成本地构建配置：
+公库不会包含 Google OAuth 客户端 ID 和客户端密钥。自用或二次分发前，需要自己创建 Desktop OAuth Client，并在本地生成配置文件：
 
 ```powershell
-$env:STUDY_CARDS_GOOGLE_CLIENT_ID="你的客户端 ID"
-$env:STUDY_CARDS_GOOGLE_CLIENT_SECRET="***"
+$env:STUDY_CARDS_GOOGLE_CLIENT_ID="你的 OAuth 客户端 ID"
+$env:STUDY_CARDS_GOOGLE_CLIENT_SECRET="你的 OAuth 客户端密钥"
 npm run oauth:configure
 ```
 
-命令会生成 `electron/oauth-config.generated.cjs`，该文件已被 `.gitignore` 忽略。正式构建内置本地生成的配置后，用户只需点击"登录"，并在系统浏览器中完成 Google OAuth 授权。
+该命令会生成 `electron/oauth-config.generated.cjs`。这个文件已被 `.gitignore` 忽略，不应提交到公开仓库。
 
-登录后可点击"立即同步"手动同步；应用保持打开时每 5 分钟后台自动检查更新。编辑操作不会立即触发同步，以免打断输入。数据存储在 Drive 私有空间，不会出现在普通文件列表中。
+## 发布说明
+
+自动更新依赖 GitHub Release 中的安装包和更新元数据。发布 Windows 版本时，Release 资产至少应包含：
+
+- `学习卡片-<version>-x64.exe`
+- `latest.yml`
+- `学习卡片-<version>-x64.exe.blockmap`

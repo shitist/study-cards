@@ -1,10 +1,18 @@
-import type { AppSettings, CardDatabase, DriveStatus, DriveSyncResult, StorageInfo } from "../types/models";
+import type { AppSettings, CardDatabase, DriveStatus, DriveSyncResult, StorageInfo, UpdateStatus } from "../types/models";
 import { createEmptyDatabase } from "./cards";
 
 const fallbackDatabaseKey = "study-cards.database.v1";
 const fallbackSettingsKey = "study-cards.settings.v1";
 
 export const hasNativeBridge = Boolean(window.studyCards);
+
+const unavailableUpdateStatus: UpdateStatus = {
+  status: "unavailable",
+  currentVersion: "browser-preview",
+  version: null,
+  percent: null,
+  error: "\u81ea\u52a8\u66f4\u65b0\u53ea\u80fd\u5728\u684c\u9762 App \u4e2d\u4f7f\u7528\u3002"
+};
 
 export async function loadCards(): Promise<CardDatabase> {
   if (window.studyCards) return window.studyCards.loadCards();
@@ -74,16 +82,46 @@ export async function getDriveStatus(): Promise<DriveStatus> {
 }
 
 export async function signInDrive(): Promise<DriveStatus> {
-  if (!window.studyCards) throw new Error("Google Drive 同步只能在桌面 App 中使用。");
+  if (!window.studyCards) throw new Error("Google Drive \u540c\u6b65\u53ea\u80fd\u5728\u684c\u9762 App \u4e2d\u4f7f\u7528\u3002");
   return window.studyCards.signInDrive();
 }
 
+export async function cancelSignInDrive(): Promise<{ cancelled: boolean }> {
+  if (!window.studyCards) return { cancelled: false };
+  return window.studyCards.cancelSignInDrive();
+}
+
 export async function signOutDrive(): Promise<DriveStatus> {
-  if (!window.studyCards) throw new Error("Google Drive 同步只能在桌面 App 中使用。");
+  if (!window.studyCards) throw new Error("Google Drive \u540c\u6b65\u53ea\u80fd\u5728\u684c\u9762 App \u4e2d\u4f7f\u7528\u3002");
   return window.studyCards.signOutDrive();
 }
 
 export async function syncDrive(): Promise<DriveSyncResult> {
-  if (!window.studyCards) throw new Error("Google Drive 同步只能在桌面 App 中使用。");
+  if (!window.studyCards) throw new Error("Google Drive \u540c\u6b65\u53ea\u80fd\u5728\u684c\u9762 App \u4e2d\u4f7f\u7528\u3002");
   return window.studyCards.syncDrive();
+}
+
+export async function getUpdateStatus(): Promise<UpdateStatus> {
+  if (!window.studyCards) return unavailableUpdateStatus;
+  return window.studyCards.getUpdateStatus();
+}
+
+export async function checkForUpdates(): Promise<UpdateStatus> {
+  if (!window.studyCards) return unavailableUpdateStatus;
+  return window.studyCards.checkForUpdates();
+}
+
+export async function downloadUpdate(): Promise<UpdateStatus> {
+  if (!window.studyCards) return unavailableUpdateStatus;
+  return window.studyCards.downloadUpdate();
+}
+
+export async function installUpdate(): Promise<UpdateStatus> {
+  if (!window.studyCards) return unavailableUpdateStatus;
+  return window.studyCards.installUpdate();
+}
+
+export function onUpdateStatus(callback: (status: UpdateStatus) => void) {
+  if (!window.studyCards) return () => undefined;
+  return window.studyCards.onUpdateStatus(callback);
 }
