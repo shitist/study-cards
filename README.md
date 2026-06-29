@@ -51,11 +51,3 @@ npm run oauth:configure
 ```
 
 该命令会生成 `electron/oauth-config.generated.cjs`。这个文件已被 `.gitignore` 忽略，不应提交到公开仓库。
-
-## 发布说明
-
-自动更新依赖 GitHub Release 中的安装包和更新元数据。发布 Windows 版本时，Release 资产至少应包含：
-
-- `学习卡片-<version>-x64.exe`
-- `latest.yml`
-- `学习卡片-<version>-x64.exe.blockmap`
