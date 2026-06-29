@@ -42,7 +42,7 @@ npm run package:win
 
 ## Google Drive OAuth 配置
 
-公库不会包含 Google OAuth 客户端 ID 和客户端密钥。自用或二次分发前，需要自己创建 Desktop OAuth Client，并在本地生成配置文件：
+不包含 Google OAuth 客户端 ID 和客户端密钥。自用或二次分发前，需要自己创建 Desktop OAuth Client，并在本地生成配置文件：
 
 ```powershell
 $env:STUDY_CARDS_GOOGLE_CLIENT_ID="你的 OAuth 客户端 ID"
@@ -50,4 +50,4 @@ $env:STUDY_CARDS_GOOGLE_CLIENT_SECRET="你的 OAuth 客户端密钥"
 npm run oauth:configure
 ```
 
-该命令会生成 `electron/oauth-config.generated.cjs`。这个文件已被 `.gitignore` 忽略，不应提交到公开仓库。
+该命令会生成 `electron/oauth-config.generated.cjs`。这个文件已被 `.gitignore` 忽略，注意不要提交到公开仓库。
